@@ -776,16 +776,32 @@ curl http://localhost:8000/v1/auth/status | python -m json.tool
 ```
 
 ### ⚙️ **Development Tools**
+
+This project uses **black** (pinned to `24.10.0`, line length 100) for code
+formatting, enforced as a **hard-fail check in CI**. Set up your environment
+once so formatting is handled automatically:
+
 ```bash
-# Install development dependencies
-poetry install --with dev
-
-# Format code
-poetry run black .
-
-# Run full tests (when implemented)
-poetry run pytest tests/
+# Install all dependencies plus the format-on-commit git hook
+make install
+# (equivalent to: poetry install && poetry run pre-commit install)
 ```
+
+`pre-commit install` wires black into your `git commit`: staged code is
+formatted automatically and the commit is blocked if it wasn't already
+formatted, so unformatted code can't reach a PR. Common tasks:
+
+```bash
+make format   # auto-format src and tests with the pinned black
+make lint     # check formatting exactly as CI does (black --check src tests)
+make test     # run the test suite with coverage
+make check    # reproduce the full CI gate locally (black, bandit, pytest, mypy)
+```
+
+All targets run through Poetry, so they use the same pinned tool versions CI
+uses. Avoid running a system-wide `black` directly — a different black version
+can reformat code in ways the pinned CI check rejects. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
 ### ✅ **Expected Results**
 All tests should show:
@@ -875,3 +891,8 @@ MIT Licence
 ## Contributing
 
 Contributions are welcome! Please open an issue or submit a pull request.
+
+Before your first commit, run `make install` (or `poetry install && poetry run
+pre-commit install`) so black formats your changes automatically on every
+commit and CI's formatting gate stays green. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.

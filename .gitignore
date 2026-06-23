@@ -42,8 +42,11 @@ logs/
 .pytest_cache/
 htmlcov/
 
-# Claude Code
-.claude/
+# Claude Code: keep shared project settings + hooks, ignore personal/local files
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+.claude/settings.local.json
 
 # Development documentation
 IMPLEMENTATION_PLAN.md
