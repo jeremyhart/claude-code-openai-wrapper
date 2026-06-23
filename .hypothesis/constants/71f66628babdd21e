@@ -1,4 +1,0 @@
-# file: /home/user/claude-code-openai-wrapper/src/observability.py
-# hypothesis_version: 6.148.8
-
-[0.0, 2.0, 5.0, 100, 10000, 1000000000, ',', '/metrics', '1', '=', 'INFO', 'LOKI_JOB', 'LOKI_LABELS', 'LOKI_LOG_LEVEL', 'LOKI_URL', 'METRICS_ENABLED', '_', 'asctime', 'exception', 'httpcore', 'httpx', 'job', 'level', 'logger', 'loki-shipper', 'message', 'on', 'stream', 'streams', 'taskName', 'timestamp', 'true', 'values', 'yes']

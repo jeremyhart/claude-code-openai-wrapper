@@ -1,4 +1,0 @@
-# file: /home/user/claude-code-openai-wrapper/src/function_calling.py
-# hypothesis_version: 6.148.8
-
-['\\{.*\\}', '```\\s*(.*?)```', '```json\\s*(.*?)```', 'arguments', 'description', 'function', 'id', 'name', 'none', 'parameters', 'required', 'tool_calls', 'type', '{}']
