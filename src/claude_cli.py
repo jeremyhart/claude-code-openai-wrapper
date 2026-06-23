@@ -291,6 +291,12 @@ class ClaudeCodeCLI:
         }
 
         for message in messages:
+            # AssistantMessage carries the actual model that generated the response.
+            # This is the most reliable source of the real model and overrides the
+            # client-requested name.
+            if message.get("model") and "content" in message:
+                metadata["model"] = message["model"]
+
             # New SDK format - ResultMessage
             if message.get("subtype") == "success" and "total_cost_usd" in message:
                 metadata.update(

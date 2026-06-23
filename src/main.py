@@ -43,7 +43,13 @@ from src.models import (
 )
 from src.claude_cli import ClaudeCodeCLI
 from src.message_adapter import MessageAdapter
-from src.auth import verify_api_key, security, validate_claude_code_auth, get_claude_code_auth_info
+from src.auth import (
+    verify_api_key,
+    security,
+    validate_claude_code_auth,
+    get_claude_code_auth_info,
+    auth_manager,
+)
 from src.parameter_validator import ParameterValidator, CompatibilityReporter
 from src.session_manager import session_manager
 from src.tool_manager import tool_manager
@@ -626,6 +632,73 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(status_code=422, content=error_response)
 
 
+def _log_claude_proxy_start(
+    request_id, requested_model, session_id, auth_method, endpoint, streaming
+):
+    """Emit the structured 'request forwarded to Claude' event used by the dashboard."""
+    logger.info(
+        f"Proxying {'streaming ' if streaming else ''}completion to Claude (model={requested_model})",
+        extra={
+            "event": "claude_proxy_start",
+            "request_id": request_id,
+            "model": requested_model,
+            "session_id": session_id,
+            "auth_method": auth_method,
+            "endpoint": endpoint,
+            "streaming": streaming,
+        },
+    )
+
+
+def _log_claude_proxy_success(
+    request_id,
+    requested_model,
+    metadata,
+    prompt,
+    completion_text,
+    session_id,
+    duration_ms,
+    endpoint,
+    streaming,
+):
+    """Emit the structured success event with real SDK usage/cost (falling back to estimate).
+
+    Returns (prompt_tokens, completion_tokens, cost_usd) so callers can reuse them.
+    """
+    sdk_usage = metadata.get("usage")
+    if sdk_usage:
+        prompt_tokens = sdk_usage["prompt_tokens"]
+        completion_tokens = sdk_usage["completion_tokens"]
+        tokens_source = "sdk"
+    else:
+        prompt_tokens = MessageAdapter.estimate_tokens(prompt)
+        completion_tokens = MessageAdapter.estimate_tokens(completion_text or "")
+        tokens_source = "estimate"
+    cost_usd = metadata.get("total_cost_usd") or 0.0
+    # The model the SDK actually ran, not the (possibly bogus) client-requested name.
+    resolved_model = metadata.get("model") or requested_model
+    logger.info(
+        f"Claude completion succeeded (model={resolved_model}, "
+        f"{prompt_tokens + completion_tokens} tokens, ${cost_usd:.4f}, {duration_ms:.0f}ms)",
+        extra={
+            "event": "claude_proxy_success",
+            "request_id": request_id,
+            "model": resolved_model,
+            "requested_model": requested_model,
+            "session_id": session_id,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "cost_usd": round(cost_usd, 6),
+            "tokens_source": tokens_source,
+            "endpoint": endpoint,
+            "streaming": streaming,
+            "claude_duration_ms": round(duration_ms, 1),
+        },
+    )
+    return prompt_tokens, completion_tokens, cost_usd
+
+
 async def generate_streaming_response(
     request: ChatCompletionRequest, request_id: str, claude_headers: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
@@ -678,6 +751,16 @@ async def generate_streaming_response(
             logger.info(f"Tools enabled by user request: {DEFAULT_ALLOWED_TOOLS}")
 
         # Run Claude Code
+        proxy_model = claude_options.get("model") or request.model
+        _log_claude_proxy_start(
+            request_id,
+            proxy_model,
+            actual_session_id,
+            auth_manager.auth_method,
+            "/v1/chat/completions",
+            streaming=True,
+        )
+        claude_start = asyncio.get_event_loop().time()
         chunks_buffer = []
         role_sent = False  # Track if we've sent the initial role chunk
         content_sent = False  # Track if we've sent any content
@@ -814,6 +897,22 @@ async def generate_streaming_response(
                 assistant_message = Message(role="assistant", content=assistant_content)
                 session_manager.add_assistant_response(actual_session_id, assistant_message)
 
+        # Emit the structured success event so streaming requests appear on the
+        # dashboard with real token/cost/model data, just like non-streaming ones.
+        claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
+        stream_metadata = claude_cli.extract_metadata(chunks_buffer)
+        _log_claude_proxy_success(
+            request_id=request_id,
+            requested_model=proxy_model,
+            metadata=stream_metadata,
+            prompt=prompt,
+            completion_text=assistant_content or "",
+            session_id=actual_session_id,
+            duration_ms=claude_duration_ms,
+            endpoint="/v1/chat/completions",
+            streaming=True,
+        )
+
         # Prepare usage data if requested
         usage_data = None
         if request.stream_options and request.stream_options.include_usage:
@@ -941,15 +1040,13 @@ async def chat_completions(
 
             # Collect all chunks
             proxy_model = claude_options.get("model") or request_body.model
-            logger.info(
-                f"Proxying chat completion to Claude (model={proxy_model})",
-                extra={
-                    "event": "claude_proxy_start",
-                    "request_id": request_id,
-                    "model": proxy_model,
-                    "session_id": actual_session_id,
-                    "auth_method": auth_info.get("method"),
-                },
+            _log_claude_proxy_start(
+                request_id,
+                proxy_model,
+                actual_session_id,
+                auth_info.get("method"),
+                "/v1/chat/completions",
+                streaming=False,
             )
             claude_start = asyncio.get_event_loop().time()
             chunks = []
@@ -979,21 +1076,21 @@ async def chat_completions(
                 assistant_message = Message(role="assistant", content=assistant_content)
                 session_manager.add_assistant_response(actual_session_id, assistant_message)
 
-            # Prefer the real token usage and cost reported by the SDK; fall back to
-            # a character-based estimate only when the SDK doesn't provide usage.
+            # Log the structured success event with real SDK usage/cost (falling
+            # back to estimate) and reuse the resolved token counts for the response.
+            claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
             metadata = claude_cli.extract_metadata(chunks)
-            sdk_usage = metadata.get("usage")
-            if sdk_usage:
-                prompt_tokens = sdk_usage["prompt_tokens"]
-                completion_tokens = sdk_usage["completion_tokens"]
-                tokens_source = "sdk"
-            else:
-                prompt_tokens = MessageAdapter.estimate_tokens(prompt)
-                completion_tokens = MessageAdapter.estimate_tokens(assistant_content)
-                tokens_source = "estimate"
-            cost_usd = metadata.get("total_cost_usd") or 0.0
-            # Use the canonical model the SDK actually ran when available.
-            resolved_model = metadata.get("model") or proxy_model
+            prompt_tokens, completion_tokens, _cost = _log_claude_proxy_success(
+                request_id=request_id,
+                requested_model=proxy_model,
+                metadata=metadata,
+                prompt=prompt,
+                completion_text=assistant_content,
+                session_id=actual_session_id,
+                duration_ms=claude_duration_ms,
+                endpoint="/v1/chat/completions",
+                streaming=False,
+            )
 
             # Create response
             response = ChatCompletionResponse(
@@ -1011,26 +1108,6 @@ async def chat_completions(
                     completion_tokens=completion_tokens,
                     total_tokens=prompt_tokens + completion_tokens,
                 ),
-            )
-
-            claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
-            logger.info(
-                f"Claude completion succeeded (model={resolved_model}, "
-                f"{prompt_tokens + completion_tokens} tokens, "
-                f"${cost_usd:.4f}, {claude_duration_ms:.0f}ms)",
-                extra={
-                    "event": "claude_proxy_success",
-                    "request_id": request_id,
-                    "model": resolved_model,
-                    "requested_model": proxy_model,
-                    "session_id": actual_session_id,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                    "cost_usd": round(cost_usd, 6),
-                    "tokens_source": tokens_source,
-                    "claude_duration_ms": round(claude_duration_ms, 1),
-                },
             )
 
             return response
@@ -1070,6 +1147,7 @@ async def anthropic_messages(
         raise HTTPException(status_code=503, detail=error_detail)
 
     try:
+        request_id = f"msg-{os.urandom(8).hex()}"
         logger.info(f"Anthropic Messages API request: model={request_body.model}")
 
         # Convert Anthropic messages to internal format
@@ -1093,6 +1171,15 @@ async def anthropic_messages(
 
         # Run Claude Code - tools enabled by default for Anthropic SDK clients
         # (they're typically using this for agentic workflows)
+        _log_claude_proxy_start(
+            request_id,
+            request_body.model,
+            None,
+            auth_info.get("method"),
+            "/v1/messages",
+            streaming=False,
+        )
+        claude_start = asyncio.get_event_loop().time()
         chunks = []
         async for chunk in claude_cli.run_completion(
             prompt=prompt,
@@ -1114,9 +1201,20 @@ async def anthropic_messages(
         # Filter out tool usage and thinking blocks
         assistant_content = MessageAdapter.filter_content(raw_assistant_content)
 
-        # Estimate tokens
-        prompt_tokens = MessageAdapter.estimate_tokens(prompt)
-        completion_tokens = MessageAdapter.estimate_tokens(assistant_content)
+        # Log the structured success event with real SDK usage/cost (or estimate).
+        claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
+        metadata = claude_cli.extract_metadata(chunks)
+        prompt_tokens, completion_tokens, _cost = _log_claude_proxy_success(
+            request_id=request_id,
+            requested_model=request_body.model,
+            metadata=metadata,
+            prompt=prompt,
+            completion_text=assistant_content,
+            session_id=None,
+            duration_ms=claude_duration_ms,
+            endpoint="/v1/messages",
+            streaming=False,
+        )
 
         # Create Anthropic-format response
         response = AnthropicMessagesResponse(
