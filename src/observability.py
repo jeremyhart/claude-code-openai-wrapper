@@ -71,6 +71,12 @@ class JsonLogFormatter(logging.Formatter):
 # Entry tuple: (loki_timestamp_ns, formatted_line, level_label)
 _LogEntry = Tuple[str, str, str]
 
+# Loggers whose records must never be shipped to Loki. The Loki handler itself
+# POSTs via httpx, and httpx/httpcore log each request; shipping those records
+# would create a self-sustaining feedback loop (every push generates a new log
+# line to push). These are dropped from Loki regardless of log level.
+_EXCLUDED_LOGGER_PREFIXES = ("httpx", "httpcore")
+
 
 class LokiHandler(logging.Handler):
     """A logging handler that batches records and pushes them to Loki over HTTP.
@@ -102,6 +108,10 @@ class LokiHandler(logging.Handler):
         self._thread.start()
 
     def emit(self, record: logging.LogRecord) -> None:
+        # Never ship transport logs from our own push client back to Loki, which
+        # would loop endlessly.
+        if record.name.startswith(_EXCLUDED_LOGGER_PREFIXES):
+            return
         try:
             entry: _LogEntry = (
                 str(int(record.created * 1_000_000_000)),
@@ -181,6 +191,11 @@ def setup_loki_logging() -> Optional[LokiHandler]:
     handler.setFormatter(JsonLogFormatter())
     level_name = os.getenv("LOKI_LOG_LEVEL", "INFO").upper()
     handler.setLevel(getattr(logging, level_name, logging.INFO))
+
+    # The push client emits an httpx "HTTP Request" log on every flush. Quiet it
+    # to WARNING so log shipping doesn't spam the console with its own traffic.
+    for noisy in _EXCLUDED_LOGGER_PREFIXES:
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     logging.getLogger().addHandler(handler)
     logger.info("Loki log shipping enabled -> %s (labels=%s)", loki_url, labels)
