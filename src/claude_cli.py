@@ -23,6 +23,70 @@ logger = logging.getLogger(__name__)
 MAX_CLI_ARG_BYTES = 96 * 1024
 
 
+# Known Claude/Anthropic API error strings (as surfaced by the CLI in the
+# ResultMessage ``result`` field) mapped to OpenAI-compatible error envelopes.
+# Matching is a lowercased substring so minor CLI wording changes don't break it.
+# Each entry is (needle, status_code, openai_error_type, openai_error_code).
+_API_ERROR_SIGNATURES = [
+    # The request exceeded the model's context window. This is the case behind
+    # the raw ``Prompt is too long`` blob that previously leaked to clients.
+    ("prompt is too long", 400, "invalid_request_error", "context_length_exceeded"),
+    ("credit balance is too low", 400, "invalid_request_error", "insufficient_quota"),
+    ("rate limit", 429, "rate_limit_error", "rate_limit_exceeded"),
+    ("overloaded", 529, "overloaded_error", "overloaded"),
+]
+
+
+def classify_sdk_error(message: str, api_error_status: Optional[int] = None) -> Dict[str, Any]:
+    """Map an SDK/CLI error string to an OpenAI-style error envelope.
+
+    Returns a dict with ``message``, ``status_code``, ``type`` and ``code``.
+    Recognizes a handful of well-known Anthropic API errors (notably
+    "Prompt is too long", which means the request exceeded the model's context
+    window) so callers can return an accurate HTTP status and error code instead
+    of a generic 500 — or worse, a 200 with the error text as the reply. Falls
+    back to ``api_error_status`` (when the CLI provided one) or 500.
+    """
+    text = (message or "").strip() or "Claude Code error"
+    lowered = text.lower()
+    for needle, status, err_type, code in _API_ERROR_SIGNATURES:
+        if needle in lowered:
+            return {"message": text, "status_code": status, "type": err_type, "code": code}
+
+    if api_error_status:
+        err_type = "api_error" if api_error_status >= 500 else "invalid_request_error"
+        return {
+            "message": text,
+            "status_code": api_error_status,
+            "type": err_type,
+            "code": str(api_error_status),
+        }
+
+    return {"message": text, "status_code": 500, "type": "api_error", "code": "500"}
+
+
+def find_sdk_error(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Scan SDK chunks for an error result and return a classified envelope.
+
+    The CLI signals an upstream API failure with a ResultMessage carrying
+    ``is_error=True`` (the human-readable reason is in ``result``; an HTTP status
+    may be in ``api_error_status``). Note the CLI emits ``subtype="success"`` even
+    for these API errors, so ``is_error`` — not the subtype — is the reliable
+    signal. Our own subprocess-failure path uses ``error_during_execution`` with
+    the reason in ``error_message``. Both are handled here so an error is never
+    mistaken for a successful completion. Returns ``None`` when no chunk is an
+    error.
+    """
+    for message in messages:
+        is_error = bool(message.get("is_error"))
+        subtype = message.get("subtype")
+        if not (is_error or subtype in ("error_during_execution", "error_max_turns")):
+            continue
+        text = message.get("result") or message.get("error_message") or "Claude Code error"
+        return classify_sdk_error(text, message.get("api_error_status"))
+    return None
+
+
 class ClaudeCodeCLI:
     def __init__(self, timeout: int = 600000, cwd: Optional[str] = None):
         self.timeout = timeout / 1000  # Convert ms to seconds
@@ -269,9 +333,17 @@ class ClaudeCodeCLI:
         Prioritizes ResultMessage.result for multi-turn conversations,
         falls back to last AssistantMessage content.
         """
-        # First, check for ResultMessage with 'result' field (multi-turn completion)
+        # First, check for ResultMessage with 'result' field (multi-turn completion).
+        # Skip error results: the CLI reports API failures (e.g. "Prompt is too
+        # long") with subtype="success" but is_error=True, and the error text
+        # lives in 'result'. Returning it here would surface an error as a normal
+        # assistant reply. Callers detect errors separately via find_sdk_error().
         for message in messages:
-            if message.get("subtype") == "success" and "result" in message:
+            if (
+                message.get("subtype") == "success"
+                and "result" in message
+                and not message.get("is_error")
+            ):
                 return message["result"]
 
         # Collect all text from AssistantMessages (take the last one with text)

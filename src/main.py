@@ -43,7 +43,7 @@ from src.models import (
     AnthropicToolUseBlock,
     AnthropicUsage,
 )
-from src.claude_cli import ClaudeCodeCLI
+from src.claude_cli import ClaudeCodeCLI, find_sdk_error
 from src.message_adapter import MessageAdapter
 from src.function_calling import build_tool_prompt, parse_tool_calls, resolve_tools
 from src.auth import (
@@ -329,6 +329,48 @@ def prompt_for_api_protection() -> Optional[str]:
 claude_cli = ClaudeCodeCLI(
     timeout=int(os.getenv("MAX_TIMEOUT", "600000")), cwd=os.getenv("CLAUDE_CWD")
 )
+
+
+class ClaudeProxyError(HTTPException):
+    """HTTPException that carries an OpenAI-style error ``type`` and ``code``.
+
+    Raised when the Claude SDK/CLI reports an upstream API failure (e.g. a
+    "Prompt is too long" context-window error) so the response is a well-formed
+    OpenAI error envelope with an accurate status, type and code instead of a
+    generic 500 or — as before — a 200 whose content is the raw error string.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 500,
+        error_type: str = "api_error",
+        code: Optional[str] = None,
+    ):
+        super().__init__(status_code=status_code, detail=message)
+        self.error_type = error_type
+        self.code = code or str(status_code)
+
+
+def _raise_for_sdk_error(chunks: List[Dict[str, Any]]) -> None:
+    """Raise a :class:`ClaudeProxyError` if the SDK chunks contain an error result.
+
+    No-op when the run succeeded. Centralizes the non-streaming error check so the
+    chat-completions and messages endpoints fail the same way.
+    """
+    sdk_error = find_sdk_error(chunks)
+    if sdk_error is None:
+        return
+    logger.error(
+        f"Claude SDK error: {sdk_error['message']} "
+        f"(status={sdk_error['status_code']}, code={sdk_error['code']})"
+    )
+    raise ClaudeProxyError(
+        message=sdk_error["message"],
+        status_code=sdk_error["status_code"],
+        error_type=sdk_error["type"],
+        code=sdk_error["code"],
+    )
 
 
 @asynccontextmanager
@@ -736,6 +778,10 @@ async def _run_single_completion(
     ):
         chunks.append(chunk)
 
+    # Surface upstream API failures (e.g. "Prompt is too long") as proper errors
+    # instead of letting the error text fall through as a successful reply.
+    _raise_for_sdk_error(chunks)
+
     # Extract assistant message
     raw_assistant_content = claude_cli.parse_claude_message(chunks)
 
@@ -928,11 +974,9 @@ async def generate_streaming_response(
 
                 # Detect an error result yielded by the SDK so we can terminate
                 # the stream cleanly rather than letting it surface as a throw.
-                if chunk.get("is_error") or chunk.get("subtype") in (
-                    "error_during_execution",
-                    "error_max_turns",
-                ):
-                    stream_error_message = chunk.get("error_message") or "Claude Code error"
+                sdk_error = find_sdk_error([chunk])
+                if sdk_error is not None:
+                    stream_error_message = sdk_error["message"]
                     logger.error(f"SDK error during streaming: {stream_error_message}")
                     break
 
@@ -1481,11 +1525,9 @@ async def generate_anthropic_streaming_response(
         ):
             chunks_buffer.append(chunk)
 
-            if chunk.get("is_error") or chunk.get("subtype") in (
-                "error_during_execution",
-                "error_max_turns",
-            ):
-                stream_error_message = chunk.get("error_message") or "Claude Code error"
+            sdk_error = find_sdk_error([chunk])
+            if sdk_error is not None:
+                stream_error_message = sdk_error["message"]
                 logger.error(f"SDK error during streaming: {stream_error_message}")
                 break
 
@@ -1749,6 +1791,10 @@ async def anthropic_messages(
             stream=False,
         ):
             chunks.append(chunk)
+
+        # Surface upstream API failures (e.g. "Prompt is too long") as proper
+        # errors instead of returning the error text as the assistant message.
+        _raise_for_sdk_error(chunks)
 
         # Extract assistant message
         raw_assistant_content = claude_cli.parse_claude_message(chunks)
@@ -2867,12 +2913,17 @@ async def get_mcp_stats(
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Format HTTP exceptions as OpenAI-style errors."""
+    """Format HTTP exceptions as OpenAI-style errors.
+
+    ``ClaudeProxyError`` carries a specific ``type``/``code`` (e.g.
+    context_length_exceeded); plain ``HTTPException`` falls back to the generic
+    api_error envelope keyed by status code.
+    """
+    error_type = getattr(exc, "error_type", "api_error")
+    code = getattr(exc, "code", str(exc.status_code))
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "error": {"message": exc.detail, "type": "api_error", "code": str(exc.status_code)}
-        },
+        content={"error": {"message": exc.detail, "type": error_type, "code": code}},
     )
 
 
