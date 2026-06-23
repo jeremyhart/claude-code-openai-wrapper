@@ -19,6 +19,14 @@ def get_default_model():
     return constants.RESOLVED_DEFAULT_MODEL or constants.DEFAULT_MODEL_FALLBACK
 
 
+# Resolve the default for the `enable_tools` request flag lazily so the
+# ENABLE_TOOLS env var is honored without creating an import cycle.
+def _get_enable_tools_default():
+    from src import constants
+
+    return constants.ENABLE_TOOLS_DEFAULT
+
+
 class ContentPart(BaseModel):
     """Content part for multimodal messages (OpenAI format)."""
 
@@ -77,8 +85,8 @@ class ChatCompletionRequest(BaseModel):
         default=None, description="Optional session ID for conversation continuity"
     )
     enable_tools: Optional[bool] = Field(
-        default=False,
-        description="Enable Claude Code tools (Read, Write, Bash, etc.) - disabled by default for OpenAI compatibility",
+        default_factory=lambda: _get_enable_tools_default(),
+        description="Enable Claude Code tools (Read, Write, Bash, etc.) - disabled by default for OpenAI compatibility. Default can be flipped via the ENABLE_TOOLS env var.",
     )
     stream_options: Optional[StreamOptions] = Field(
         default=None, description="Options for streaming responses"

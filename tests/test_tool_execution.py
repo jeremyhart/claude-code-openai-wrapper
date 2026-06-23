@@ -154,5 +154,73 @@ class TestClaudeCliPermissionMode:
         ), "run_completion should accept permission_mode parameter"
 
 
+class TestToolEnvOverrides:
+    """Test environment-variable overrides for tool configuration."""
+
+    def _reload_constants(self, env):
+        """Reload src.constants with patched environment and return the module."""
+        import importlib
+        import os
+        from unittest.mock import patch
+
+        from src import constants
+
+        with patch.dict(os.environ, env, clear=False):
+            return importlib.reload(constants)
+
+    def test_allowed_tools_env_override(self):
+        """ALLOWED_TOOLS env var overrides the default allowed set."""
+        constants = self._reload_constants({"ALLOWED_TOOLS": "Read,Grep"})
+        try:
+            assert constants.DEFAULT_ALLOWED_TOOLS == ["Read", "Grep"]
+        finally:
+            self._reload_constants({})  # restore defaults
+
+    def test_disallowed_tools_env_override(self):
+        """DISALLOWED_TOOLS env var overrides the default disallowed set."""
+        constants = self._reload_constants({"DISALLOWED_TOOLS": "Task"})
+        try:
+            assert constants.DEFAULT_DISALLOWED_TOOLS == ["Task"]
+        finally:
+            self._reload_constants({})
+
+    def test_unknown_tool_names_are_dropped(self):
+        """Unknown tool names in the env override are ignored with a warning."""
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            constants = self._reload_constants({"ALLOWED_TOOLS": "Read,Bogus,Grep"})
+        try:
+            assert constants.DEFAULT_ALLOWED_TOOLS == ["Read", "Grep"]
+            assert any("Bogus" in str(w.message) for w in caught)
+        finally:
+            self._reload_constants({})
+
+    def test_empty_env_falls_back_to_defaults(self):
+        """Empty/unset env vars fall back to the built-in defaults."""
+        constants = self._reload_constants({"ALLOWED_TOOLS": "", "DISALLOWED_TOOLS": ""})
+        try:
+            assert constants.DEFAULT_ALLOWED_TOOLS == constants._DEFAULT_ALLOWED_TOOLS_FALLBACK
+            assert constants.DEFAULT_DISALLOWED_TOOLS == constants._DEFAULT_DISALLOWED_TOOLS_FALLBACK
+        finally:
+            self._reload_constants({})
+
+    def test_enable_tools_default_env(self):
+        """ENABLE_TOOLS env var flips the default for the enable_tools flag."""
+        for value in ("true", "1", "yes", "on"):
+            constants = self._reload_constants({"ENABLE_TOOLS": value})
+            try:
+                assert constants.ENABLE_TOOLS_DEFAULT is True, f"{value!r} should be truthy"
+            finally:
+                self._reload_constants({})
+
+        constants = self._reload_constants({"ENABLE_TOOLS": "false"})
+        try:
+            assert constants.ENABLE_TOOLS_DEFAULT is False
+        finally:
+            self._reload_constants({})
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
