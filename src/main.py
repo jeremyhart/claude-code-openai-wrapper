@@ -979,9 +979,21 @@ async def chat_completions(
                 assistant_message = Message(role="assistant", content=assistant_content)
                 session_manager.add_assistant_response(actual_session_id, assistant_message)
 
-            # Estimate tokens (rough approximation)
-            prompt_tokens = MessageAdapter.estimate_tokens(prompt)
-            completion_tokens = MessageAdapter.estimate_tokens(assistant_content)
+            # Prefer the real token usage and cost reported by the SDK; fall back to
+            # a character-based estimate only when the SDK doesn't provide usage.
+            metadata = claude_cli.extract_metadata(chunks)
+            sdk_usage = metadata.get("usage")
+            if sdk_usage:
+                prompt_tokens = sdk_usage["prompt_tokens"]
+                completion_tokens = sdk_usage["completion_tokens"]
+                tokens_source = "sdk"
+            else:
+                prompt_tokens = MessageAdapter.estimate_tokens(prompt)
+                completion_tokens = MessageAdapter.estimate_tokens(assistant_content)
+                tokens_source = "estimate"
+            cost_usd = metadata.get("total_cost_usd") or 0.0
+            # Use the canonical model the SDK actually ran when available.
+            resolved_model = metadata.get("model") or proxy_model
 
             # Create response
             response = ChatCompletionResponse(
@@ -1003,16 +1015,20 @@ async def chat_completions(
 
             claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
             logger.info(
-                f"Claude completion succeeded (model={proxy_model}, "
-                f"{prompt_tokens + completion_tokens} tokens, {claude_duration_ms:.0f}ms)",
+                f"Claude completion succeeded (model={resolved_model}, "
+                f"{prompt_tokens + completion_tokens} tokens, "
+                f"${cost_usd:.4f}, {claude_duration_ms:.0f}ms)",
                 extra={
                     "event": "claude_proxy_success",
                     "request_id": request_id,
-                    "model": proxy_model,
+                    "model": resolved_model,
+                    "requested_model": proxy_model,
                     "session_id": actual_session_id,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "total_tokens": prompt_tokens + completion_tokens,
+                    "cost_usd": round(cost_usd, 6),
+                    "tokens_source": tokens_source,
                     "claude_duration_ms": round(claude_duration_ms, 1),
                 },
             )

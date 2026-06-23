@@ -239,6 +239,70 @@ class TestClaudeCodeCLIExtractMetadata:
         assert metadata["duration_ms"] == 0
         assert metadata["num_turns"] == 0
         assert metadata["model"] is None
+        assert metadata["usage"] is None
+
+    def test_extract_real_token_usage_from_result(self, cli_class):
+        """Real token usage from the SDK ResultMessage is parsed into metadata."""
+        cli = MagicMock()
+        cli.extract_metadata = cli_class.extract_metadata.__get__(cli, cli_class)
+        cli._tokens_from_usage = cli_class._tokens_from_usage
+
+        messages = [
+            {
+                "subtype": "success",
+                "total_cost_usd": 0.0123,
+                "duration_ms": 900,
+                "num_turns": 1,
+                "session_id": "sess-xyz",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 5,
+                },
+            }
+        ]
+        metadata = cli.extract_metadata(messages)
+
+        # Prompt tokens include cache read/creation tokens.
+        assert metadata["usage"]["prompt_tokens"] == 125
+        assert metadata["usage"]["completion_tokens"] == 50
+        assert metadata["usage"]["total_tokens"] == 175
+        assert metadata["total_cost_usd"] == 0.0123
+
+
+class TestClaudeCodeCLITokensFromUsage:
+    """Test ClaudeCodeCLI._tokens_from_usage()"""
+
+    @pytest.fixture
+    def fn(self):
+        from src.claude_cli import ClaudeCodeCLI
+
+        return ClaudeCodeCLI._tokens_from_usage
+
+    def test_dict_usage(self, fn):
+        result = fn({"input_tokens": 10, "output_tokens": 4})
+        assert result["prompt_tokens"] == 10
+        assert result["completion_tokens"] == 4
+        assert result["total_tokens"] == 14
+
+    def test_object_usage(self, fn):
+        class Usage:
+            input_tokens = 7
+            output_tokens = 3
+            cache_read_input_tokens = 0
+            cache_creation_input_tokens = 0
+
+        result = fn(Usage())
+        assert result["prompt_tokens"] == 7
+        assert result["completion_tokens"] == 3
+
+    def test_none_and_empty_usage_return_none(self, fn):
+        assert fn(None) is None
+        assert fn({"input_tokens": 0, "output_tokens": 0}) is None
+
+    def test_malformed_values_are_coerced(self, fn):
+        assert fn({"input_tokens": None, "output_tokens": "5"})["completion_tokens"] == 5
 
 
 class TestClaudeCodeCLIEstimateTokenUsage:

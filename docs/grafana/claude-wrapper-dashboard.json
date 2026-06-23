@@ -840,6 +840,22 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost ($)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
           }
         ]
       },
@@ -854,7 +870,8 @@
           "fields": [
             "prompt tokens",
             "completion tokens",
-            "total tokens"
+            "total tokens",
+            "cost ($)"
           ]
         },
         "sortBy": [
@@ -900,6 +917,15 @@
           },
           "expr": "count by (model) (sum_over_time({job=~\"$job\"} | json | event=\"claude_proxy_success\" | unwrap total_tokens [$__range]))",
           "queryType": "instant"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "loki",
+            "uid": "${DS_LOKI}"
+          },
+          "expr": "sum by (model) (sum_over_time({job=~\"$job\"} | json | event=\"claude_proxy_success\" | unwrap cost_usd [$__range]))",
+          "queryType": "instant"
         }
       ],
       "transformations": [
@@ -918,13 +944,15 @@
               "Value #A": 1,
               "Value #B": 2,
               "Value #C": 3,
-              "Value #D": 4
+              "Value #D": 4,
+              "Value #E": 5
             },
             "renameByName": {
               "Value #A": "prompt tokens",
               "Value #B": "completion tokens",
               "Value #C": "total tokens",
-              "Value #D": "requests"
+              "Value #D": "requests",
+              "Value #E": "cost ($)"
             }
           }
         }

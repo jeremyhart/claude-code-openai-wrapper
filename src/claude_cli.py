@@ -239,6 +239,46 @@ class ClaudeCodeCLI:
 
         return last_text
 
+    @staticmethod
+    def _tokens_from_usage(usage: Any) -> Optional[Dict[str, int]]:
+        """Normalize the SDK/Anthropic ``usage`` payload into OpenAI-style token counts.
+
+        ``usage`` may be a dict or an object. Prompt tokens include cache
+        read/creation tokens so the count reflects total input consumption.
+        Returns None if no usage data is present.
+        """
+        if usage is None:
+            return None
+
+        def _get(key: str) -> int:
+            if isinstance(usage, dict):
+                value = usage.get(key)
+            else:
+                value = getattr(usage, key, None)
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        input_tokens = _get("input_tokens")
+        output_tokens = _get("output_tokens")
+        cache_creation = _get("cache_creation_input_tokens")
+        cache_read = _get("cache_read_input_tokens")
+
+        if not any((input_tokens, output_tokens, cache_creation, cache_read)):
+            return None
+
+        prompt_tokens = input_tokens + cache_creation + cache_read
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": prompt_tokens + output_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": cache_creation,
+            "cache_read_input_tokens": cache_read,
+        }
+
     def extract_metadata(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Extract metadata like costs, tokens, and session info from SDK messages."""
         metadata = {
@@ -247,6 +287,7 @@ class ClaudeCodeCLI:
             "duration_ms": 0,
             "num_turns": 0,
             "model": None,
+            "usage": None,
         }
 
         for message in messages:
@@ -260,6 +301,9 @@ class ClaudeCodeCLI:
                         "session_id": message.get("session_id"),
                     }
                 )
+                tokens = self._tokens_from_usage(message.get("usage"))
+                if tokens:
+                    metadata["usage"] = tokens
             # New SDK format - SystemMessage
             elif message.get("subtype") == "init" and "data" in message:
                 data = message["data"]
@@ -274,6 +318,9 @@ class ClaudeCodeCLI:
                         "session_id": message.get("session_id"),
                     }
                 )
+                tokens = self._tokens_from_usage(message.get("usage"))
+                if tokens:
+                    metadata["usage"] = tokens
             elif message.get("type") == "system" and message.get("subtype") == "init":
                 metadata.update(
                     {"session_id": message.get("session_id"), "model": message.get("model")}
