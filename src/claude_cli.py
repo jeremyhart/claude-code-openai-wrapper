@@ -104,6 +104,7 @@ class ClaudeCodeCLI:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         permission_mode: Optional[str] = None,
+        use_claude_code_preset: bool = True,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run Claude Agent using the Python SDK and yield response chunks."""
 
@@ -132,9 +133,15 @@ class ClaudeCodeCLI:
                 # custom prompt must be passed as a plain string.
                 if system_prompt:
                     options.system_prompt = system_prompt
-                else:
+                elif use_claude_code_preset:
                     # Use Claude Code preset to maintain expected behavior
                     options.system_prompt = {"type": "preset", "preset": "claude_code"}
+                else:
+                    # Neutral system prompt: behave like a raw model call without
+                    # injecting the (~18k token) Claude Code preset. Used by the
+                    # Anthropic-compatible /v1/messages endpoint so callers that
+                    # send no system prompt aren't silently bloated or steered.
+                    options.system_prompt = ""
 
                 # Set tool restrictions
                 if allowed_tools:

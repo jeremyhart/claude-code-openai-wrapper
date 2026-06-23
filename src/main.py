@@ -40,6 +40,7 @@ from src.models import (
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicTextBlock,
+    AnthropicToolUseBlock,
     AnthropicUsage,
 )
 from src.claude_cli import ClaudeCodeCLI
@@ -1426,13 +1427,29 @@ async def anthropic_messages(
         prompt = "\n\n".join(prompt_parts)
         system_prompt = request_body.get_system_prompt()
 
+        # Honor the caller's tools via the same prompt-based function-calling
+        # machinery used by /v1/chat/completions: render the tool schemas into a
+        # system-prompt fragment and parse any tool-call envelope back out of the
+        # raw response. The caller's tools are emulated rather than executed by
+        # the SDK, so the model's own (Claude Code) tools are left disabled.
+        effective_tools, effective_tool_choice = resolve_tools(
+            request_body.to_openai_tools(),
+            request_body.to_openai_tool_choice(),
+        )
+        tool_prompt = build_tool_prompt(effective_tools, effective_tool_choice)
+        if tool_prompt:
+            system_prompt = f"{system_prompt}\n\n{tool_prompt}" if system_prompt else tool_prompt
+
         # Filter content
         prompt = MessageAdapter.filter_content(prompt)
         if system_prompt:
             system_prompt = MessageAdapter.filter_content(system_prompt)
 
-        # Run Claude Code - tools enabled by default for Anthropic SDK clients
-        # (they're typically using this for agentic workflows)
+        # Run the model as a plain completion. This endpoint mirrors the native
+        # Anthropic Messages API, so the caller's system/tools are authoritative:
+        # the built-in Claude Code tools are disabled and the ~18k Claude Code
+        # preset prompt is bypassed (use_claude_code_preset=False) so requests are
+        # not silently bloated or steered by a hidden persona.
         _log_claude_proxy_start(
             request_id,
             request_body.model,
@@ -1447,9 +1464,9 @@ async def anthropic_messages(
             prompt=prompt,
             system_prompt=system_prompt,
             model=request_body.model,
-            max_turns=10,
-            allowed_tools=DEFAULT_ALLOWED_TOOLS,
-            permission_mode="bypassPermissions",
+            max_turns=1,
+            disallowed_tools=CLAUDE_TOOLS,
+            use_claude_code_preset=False,
             stream=False,
         ):
             chunks.append(chunk)
@@ -1459,6 +1476,10 @@ async def anthropic_messages(
 
         if not raw_assistant_content:
             raise HTTPException(status_code=500, detail="No response from Claude Code")
+
+        # Check the RAW content (before filtering, which strips the JSON
+        # envelope) for a prompt-based tool call.
+        parsed_tool_calls = parse_tool_calls(raw_assistant_content) if tool_prompt else None
 
         # Filter out tool usage and thinking blocks
         assistant_content = MessageAdapter.filter_content(raw_assistant_content)
@@ -1478,16 +1499,39 @@ async def anthropic_messages(
             streaming=False,
         )
 
-        # Create Anthropic-format response
-        response = AnthropicMessagesResponse(
-            model=request_body.model,
-            content=[AnthropicTextBlock(text=assistant_content)],
-            stop_reason="end_turn",
-            usage=AnthropicUsage(
-                input_tokens=prompt_tokens,
-                output_tokens=completion_tokens,
-            ),
-        )
+        # Build the Anthropic-format response. A parsed tool call becomes one or
+        # more tool_use blocks with stop_reason="tool_use"; otherwise it's a
+        # normal text block with stop_reason="end_turn".
+        if parsed_tool_calls:
+            content_blocks = []
+            for tc in parsed_tool_calls:
+                fn = tc.get("function", {})
+                try:
+                    tool_input = json.loads(fn.get("arguments", "{}"))
+                except (ValueError, TypeError):
+                    tool_input = {}
+                content_blocks.append(
+                    AnthropicToolUseBlock(name=fn.get("name", ""), input=tool_input)
+                )
+            response = AnthropicMessagesResponse(
+                model=request_body.model,
+                content=content_blocks,
+                stop_reason="tool_use",
+                usage=AnthropicUsage(
+                    input_tokens=prompt_tokens,
+                    output_tokens=completion_tokens,
+                ),
+            )
+        else:
+            response = AnthropicMessagesResponse(
+                model=request_body.model,
+                content=[AnthropicTextBlock(text=assistant_content)],
+                stop_reason="end_turn",
+                usage=AnthropicUsage(
+                    input_tokens=prompt_tokens,
+                    output_tokens=completion_tokens,
+                ),
+            )
 
         return response
 

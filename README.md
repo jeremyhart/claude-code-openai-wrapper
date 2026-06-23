@@ -686,7 +686,7 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 ### Core Endpoints
 - `GET /` - Interactive landing page with API explorer
 - `POST /v1/chat/completions` - OpenAI-compatible chat completions (supports `session_id`)
-- `POST /v1/messages` - Anthropic-compatible messages endpoint
+- `POST /v1/messages` - Anthropic-compatible messages endpoint (honors `system` and `tools`; tool calls are emulated via prompt-based function calling and returned as `tool_use` blocks)
 - `GET /v1/models` - List available models
 - `GET /v1/auth/status` - Check authentication status and configuration
 - `GET /version` - Get API version
