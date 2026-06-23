@@ -151,7 +151,7 @@ def build_tool_prompt(
 
     if forced_name:
         directive = (
-            f"You MUST call the function named \"{forced_name}\" to answer this "
+            f'You MUST call the function named "{forced_name}" to answer this '
             "request. Do not answer in plain text."
         )
     elif isinstance(tool_choice, str) and tool_choice == "required":
@@ -168,7 +168,7 @@ def build_tool_prompt(
 
     envelope_example = (
         "```json\n"
-        '{\n'
+        "{\n"
         f'  "{ENVELOPE_KEY}": [\n'
         '    {"name": "<function name>", "arguments": {"<arg>": "<value>"}}\n'
         "  ]\n"

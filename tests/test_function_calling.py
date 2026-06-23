@@ -116,9 +116,7 @@ class TestParseToolCalls:
         assert parse_tool_calls("The weather is sunny today.") is None
 
     def test_parses_single_call(self):
-        text = _envelope_text(
-            [{"name": "get_weather", "arguments": {"location": "Paris"}}]
-        )
+        text = _envelope_text([{"name": "get_weather", "arguments": {"location": "Paris"}}])
         calls = parse_tool_calls(text)
         assert calls is not None
         assert len(calls) == 1
@@ -144,9 +142,7 @@ class TestParseToolCalls:
         assert calls[0]["id"] != calls[1]["id"]
 
     def test_arguments_already_string_passthrough(self):
-        text = _envelope_text(
-            [{"name": "get_weather", "arguments": '{"location": "Paris"}'}]
-        )
+        text = _envelope_text([{"name": "get_weather", "arguments": '{"location": "Paris"}'}])
         calls = parse_tool_calls(text)
         assert calls is not None
         assert calls[0]["function"]["arguments"] == '{"location": "Paris"}'
@@ -170,7 +166,7 @@ class TestParseToolCalls:
         assert parse_tool_calls(text) is None
 
     def test_envelope_without_tool_calls_key_returns_none(self):
-        text = "```json\n{\"result\": 42}\n```"
+        text = '```json\n{"result": 42}\n```'
         assert parse_tool_calls(text) is None
 
     def test_call_without_name_skipped(self):
@@ -178,7 +174,7 @@ class TestParseToolCalls:
         assert parse_tool_calls(text) is None
 
     def test_non_list_tool_calls_returns_none(self):
-        text = "```json\n{\"tool_calls\": \"nope\"}\n```"
+        text = '```json\n{"tool_calls": "nope"}\n```'
         assert parse_tool_calls(text) is None
 
 
@@ -189,9 +185,7 @@ class TestParseToolCalls:
 
 class TestLegacyNormalization:
     def test_normalize_functions_to_tools(self):
-        functions = [
-            {"name": "f", "description": "d", "parameters": {"type": "object"}}
-        ]
+        functions = [{"name": "f", "description": "d", "parameters": {"type": "object"}}]
         tools, choice = normalize_legacy_functions(functions, None)
         assert tools == [
             {
@@ -220,9 +214,7 @@ class TestLegacyNormalization:
 
     def test_resolve_prefers_modern_over_legacy(self):
         legacy_functions = [{"name": "old"}]
-        tools, _choice = resolve_tools(
-            SAMPLE_TOOLS, None, legacy_functions, None
-        )
+        tools, _choice = resolve_tools(SAMPLE_TOOLS, None, legacy_functions, None)
         assert tools == SAMPLE_TOOLS
 
     def test_resolve_falls_back_to_legacy(self):
@@ -248,9 +240,7 @@ def client(monkeypatch):
 
     # Stub the structured logging helpers (avoid real cost/token computation).
     monkeypatch.setattr(main, "_log_claude_proxy_start", lambda *a, **k: None)
-    monkeypatch.setattr(
-        main, "_log_claude_proxy_success", lambda *a, **k: (10, 5, 0.0)
-    )
+    monkeypatch.setattr(main, "_log_claude_proxy_success", lambda *a, **k: (10, 5, 0.0))
 
     return TestClient(main.app)
 
@@ -267,12 +257,8 @@ def _make_run_completion(result_text):
 def test_endpoint_returns_tool_calls(client, monkeypatch):
     import src.main as main
 
-    envelope = _envelope_text(
-        [{"name": "get_weather", "arguments": {"location": "Paris"}}]
-    )
-    monkeypatch.setattr(
-        main.claude_cli, "run_completion", _make_run_completion(envelope)
-    )
+    envelope = _envelope_text([{"name": "get_weather", "arguments": {"location": "Paris"}}])
+    monkeypatch.setattr(main.claude_cli, "run_completion", _make_run_completion(envelope))
 
     payload = {
         "model": "claude-3-5-haiku-20241022",
@@ -325,9 +311,7 @@ def test_endpoint_no_tools_unchanged(client, monkeypatch):
     """Without tools, behavior is the normal text path (regression guard)."""
     import src.main as main
 
-    monkeypatch.setattr(
-        main.claude_cli, "run_completion", _make_run_completion("Hello there.")
-    )
+    monkeypatch.setattr(main.claude_cli, "run_completion", _make_run_completion("Hello there."))
 
     payload = {
         "model": "claude-3-5-haiku-20241022",

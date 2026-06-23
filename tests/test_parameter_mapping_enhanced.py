@@ -95,9 +95,7 @@ class TestSamplingInstructionsPenalties:
 
     def test_zero_penalties_return_none(self):
         """Default (0) penalties produce no instructions."""
-        assert _request(
-            presence_penalty=0, frequency_penalty=0
-        ).get_sampling_instructions() is None
+        assert _request(presence_penalty=0, frequency_penalty=0).get_sampling_instructions() is None
 
     def test_positive_presence_penalty_encourages_new_topics(self):
         """Positive presence_penalty encourages new ideas/topics."""
@@ -223,9 +221,7 @@ class TestCompatibilityReporterClassification:
         assert "best_effort_parameters" in report
 
     def test_temperature_is_best_effort(self):
-        report = CompatibilityReporter.generate_compatibility_report(
-            _request(temperature=0.5)
-        )
+        report = CompatibilityReporter.generate_compatibility_report(_request(temperature=0.5))
         assert "temperature" in report["best_effort_parameters"]
         assert "temperature" not in report["unsupported_parameters"]
 
@@ -242,9 +238,7 @@ class TestCompatibilityReporterClassification:
         assert "frequency_penalty" in report["best_effort_parameters"]
 
     def test_max_tokens_is_best_effort(self):
-        report = CompatibilityReporter.generate_compatibility_report(
-            _request(max_tokens=200)
-        )
+        report = CompatibilityReporter.generate_compatibility_report(_request(max_tokens=200))
         assert "max_tokens" in report["best_effort_parameters"]
         assert "max_tokens" not in report["unsupported_parameters"]
 
@@ -256,9 +250,7 @@ class TestCompatibilityReporterClassification:
         assert "logit_bias" not in report["best_effort_parameters"]
 
     def test_stop_is_unsupported(self):
-        report = CompatibilityReporter.generate_compatibility_report(
-            _request(stop=["END"])
-        )
+        report = CompatibilityReporter.generate_compatibility_report(_request(stop=["END"]))
         assert "stop" in report["unsupported_parameters"]
         assert "stop" not in report["best_effort_parameters"]
 
