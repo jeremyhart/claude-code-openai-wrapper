@@ -540,6 +540,19 @@ class AnthropicTextBlock(BaseModel):
     text: str
 
 
+class AnthropicToolUseBlock(BaseModel):
+    """Anthropic ``tool_use`` content block.
+
+    Emitted in a response when the model decides to call one of the caller's
+    tools. ``input`` is the (already JSON-decoded) arguments object.
+    """
+
+    type: Literal["tool_use"] = "tool_use"
+    id: str = Field(default_factory=lambda: f"toolu_{uuid.uuid4().hex[:24]}")
+    name: str
+    input: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AnthropicMessage(BaseModel):
     """Anthropic message format."""
 
@@ -563,6 +576,65 @@ class AnthropicMessagesRequest(BaseModel):
     stop_sequences: Optional[List[str]] = None
     stream: Optional[bool] = False
     metadata: Optional[Dict[str, Any]] = None
+    tools: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Anthropic-format tool definitions ({name, description, input_schema}).",
+    )
+    tool_choice: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Anthropic tool_choice ({type: auto|any|tool|none, name?}).",
+    )
+
+    def to_openai_tools(self) -> Optional[List[Dict[str, Any]]]:
+        """Convert Anthropic-format tools to the OpenAI tool shape.
+
+        The wrapper's prompt-based function-calling machinery
+        (``function_calling.py``) operates on OpenAI-format tools
+        (``{"type": "function", "function": {name, description, parameters}}``),
+        so map the Anthropic ``input_schema`` onto OpenAI ``parameters``.
+        """
+        if not self.tools:
+            return None
+        openai_tools: List[Dict[str, Any]] = []
+        for tool in self.tools:
+            if not isinstance(tool, dict):
+                continue
+            name = tool.get("name")
+            if not name:
+                continue
+            openai_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("input_schema", {}) or {},
+                    },
+                }
+            )
+        return openai_tools or None
+
+    def to_openai_tool_choice(self) -> Optional[Union[str, Dict[str, Any]]]:
+        """Convert Anthropic ``tool_choice`` to the OpenAI form.
+
+        Anthropic uses ``{"type": "auto"|"any"|"tool"|"none", "name"?}``; the
+        prompt builder expects OpenAI's ``"auto"``/``"none"``/``"required"`` or
+        ``{"type": "function", "function": {"name": ...}}``.
+        """
+        if not self.tool_choice:
+            return None
+        choice_type = self.tool_choice.get("type")
+        if choice_type == "tool" and self.tool_choice.get("name"):
+            return {
+                "type": "function",
+                "function": {"name": self.tool_choice["name"]},
+            }
+        if choice_type == "any":
+            return "required"
+        if choice_type == "none":
+            return "none"
+        # "auto" (and anything unrecognized) → let the model decide.
+        return "auto"
 
     def to_openai_messages(self) -> List[Message]:
         """Convert Anthropic messages to OpenAI format."""
@@ -606,8 +678,10 @@ class AnthropicMessagesResponse(BaseModel):
     id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4().hex[:24]}")
     type: Literal["message"] = "message"
     role: Literal["assistant"] = "assistant"
-    content: List[AnthropicTextBlock]
+    content: List[Union[AnthropicTextBlock, AnthropicToolUseBlock]]
     model: str
-    stop_reason: Optional[Literal["end_turn", "max_tokens", "stop_sequence"]] = "end_turn"
+    stop_reason: Optional[
+        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]
+    ] = "end_turn"
     stop_sequence: Optional[str] = None
     usage: AnthropicUsage

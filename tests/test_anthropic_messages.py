@@ -133,6 +133,95 @@ class TestAnthropicMessagesModels:
         assert openai_messages[1].role == "assistant"
         assert openai_messages[2].content == "How are you?"
 
+    def test_to_openai_tools_maps_input_schema(self):
+        """Anthropic tools convert to OpenAI tool shape (input_schema→parameters)."""
+        from src.models import AnthropicMessagesRequest, AnthropicMessage
+
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5-20250929",
+            messages=[AnthropicMessage(role="user", content="weather?")],
+            tools=[
+                {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                }
+            ],
+        )
+
+        openai_tools = request.to_openai_tools()
+        assert openai_tools is not None
+        assert len(openai_tools) == 1
+        assert openai_tools[0]["type"] == "function"
+        fn = openai_tools[0]["function"]
+        assert fn["name"] == "get_weather"
+        assert fn["description"] == "Get weather"
+        assert fn["parameters"]["properties"]["city"]["type"] == "string"
+
+    def test_to_openai_tools_none_when_absent(self):
+        """No tools → None (so no tool prompt is built)."""
+        from src.models import AnthropicMessagesRequest, AnthropicMessage
+
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5-20250929",
+            messages=[AnthropicMessage(role="user", content="hi")],
+        )
+        assert request.to_openai_tools() is None
+
+    def test_to_openai_tool_choice_mapping(self):
+        """Anthropic tool_choice variants map to the OpenAI forms."""
+        from src.models import AnthropicMessagesRequest, AnthropicMessage
+
+        def choice(tc):
+            return AnthropicMessagesRequest(
+                model="m",
+                messages=[AnthropicMessage(role="user", content="x")],
+                tool_choice=tc,
+            ).to_openai_tool_choice()
+
+        assert choice({"type": "auto"}) == "auto"
+        assert choice({"type": "any"}) == "required"
+        assert choice({"type": "none"}) == "none"
+        assert choice({"type": "tool", "name": "get_weather"}) == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+        # None when unset.
+        assert AnthropicMessagesRequest(
+            model="m", messages=[AnthropicMessage(role="user", content="x")]
+        ).to_openai_tool_choice() is None
+
+    def test_tool_use_block(self):
+        """AnthropicToolUseBlock has the expected shape and an auto id."""
+        from src.models import AnthropicToolUseBlock
+
+        block = AnthropicToolUseBlock(name="get_weather", input={"city": "Wellington"})
+        assert block.type == "tool_use"
+        assert block.name == "get_weather"
+        assert block.input == {"city": "Wellington"}
+        assert block.id.startswith("toolu_")
+
+    def test_response_accepts_tool_use_content(self):
+        """The response model accepts tool_use blocks and stop_reason=tool_use."""
+        from src.models import (
+            AnthropicMessagesResponse,
+            AnthropicToolUseBlock,
+            AnthropicUsage,
+        )
+
+        response = AnthropicMessagesResponse(
+            model="claude-sonnet-4-5-20250929",
+            content=[AnthropicToolUseBlock(name="get_weather", input={"city": "X"})],
+            stop_reason="tool_use",
+            usage=AnthropicUsage(input_tokens=10, output_tokens=5),
+        )
+        assert response.stop_reason == "tool_use"
+        assert response.content[0].type == "tool_use"
+
     def test_anthropic_messages_response(self):
         """Test AnthropicMessagesResponse model."""
         from src.models import (
