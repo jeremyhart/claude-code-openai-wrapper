@@ -5,12 +5,17 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      # Optional: reuse an existing host login (`claude login`) instead of a token.
+      # Not needed when CLAUDE_CODE_OAUTH_TOKEN is set.
       - ~/.claude:/root/.claude
       # Optional: Mount a specific workspace directory
       # Uncomment and modify the line below to use a custom workspace
       # - ./workspace:/workspace
     environment:
       - PORT=8000
+      # Claude subscription (Pro/Max) auth. Generate once on your host with
+      # `claude setup-token`, then export it or put it in a .env file.
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       # Optional: Set Claude's working directory (defaults to isolated temp dir)
       # Uncomment and modify the line below to set a custom working directory
       # - CLAUDE_CWD=/workspace

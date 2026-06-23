@@ -57,6 +57,7 @@ An OpenAI API-compatible wrapper for Claude Code, allowing you to use Claude Cod
 
 ### 🔐 **Multi-Provider Authentication**
 - **Automatic detection** of authentication method
+- **Claude subscription OAuth** - use your Pro/Max plan via `CLAUDE_CODE_OAUTH_TOKEN` (no per-token API costs)
 - **Claude CLI auth** - works with existing `claude auth` setup
 - **Direct API key** - `ANTHROPIC_API_KEY` environment variable
 - **AWS Bedrock** - enterprise authentication with AWS credentials
@@ -111,15 +112,22 @@ poetry run python test_endpoints.py
    ```
 
 3. **Authentication**: Choose one method:
-   - **Option A**: Set environment variable (Recommended)
+   - **Option A — Claude subscription OAuth (Recommended for Pro/Max plans)**
+     Generate a long-lived token once, then export it. No `ANTHROPIC_API_KEY`
+     and no per-token API costs — requests bill against your subscription.
+     ```bash
+     claude setup-token          # prints a token starting with sk-ant-oat01-...
+     export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+     ```
+   - **Option B**: Set an API key
      ```bash
      export ANTHROPIC_API_KEY=your-api-key
      ```
-   - **Option B**: Authenticate via CLI
+   - **Option C**: Authenticate via CLI
      ```bash
      claude auth login
      ```
-   - **Option C**: Use AWS Bedrock or Google Vertex AI (see Configuration section)
+   - **Option D**: Use AWS Bedrock or Google Vertex AI (see Configuration section)
 
 > **Note:** The Claude Code CLI is bundled with the SDK (v0.1.18+). No separate Node.js or npm installation required!
 
@@ -302,17 +310,36 @@ RATE_LIMIT_HEALTH_PER_MINUTE=30
 
 ## Docker
 
-Build and run the wrapper in a Docker container.
+Run the wrapper in a Docker container. A prebuilt image is published to the
+GitHub Container Registry on every merge to `main`:
 
-### Build
+```bash
+docker pull ghcr.io/jeremyhart/claude-code-openai-wrapper:latest
+```
+
+…or build it yourself:
 
 ```bash
 docker build -t claude-wrapper:latest .
 ```
 
-### Run
+### Run with your Claude subscription (recommended)
 
-**Production:**
+Generate a token once on your host, then pass it to the container — no API key,
+no mounted credentials, requests bill against your Pro/Max plan:
+
+```bash
+claude setup-token   # prints sk-ant-oat01-...
+
+docker run -d -p 8000:8000 \
+  -e CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... \
+  --name claude-wrapper \
+  ghcr.io/jeremyhart/claude-code-openai-wrapper:latest
+```
+
+### Other run options
+
+**Reuse an existing host login** (instead of a token):
 ```bash
 docker run -d -p 8000:8000 \
   -v ~/.claude:/root/.claude \
@@ -323,36 +350,20 @@ docker run -d -p 8000:8000 \
 **With custom workspace:**
 ```bash
 docker run -d -p 8000:8000 \
-  -v ~/.claude:/root/.claude \
+  -e CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... \
   -v /path/to/project:/workspace \
   -e CLAUDE_CWD=/workspace \
   claude-wrapper:latest
 ```
 
-**Development (hot reload):**
-```bash
-docker run -d -p 8000:8000 \
-  -v ~/.claude:/root/.claude \
-  -v $(pwd):/app \
-  claude-wrapper:latest \
-  poetry run uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
 ### Docker Compose
 
-```yaml
-version: '3.8'
-services:
-  claude-wrapper:
-    build: .
-    ports:
-      - "8000:8000"
-    volumes:
-      - ~/.claude:/root/.claude
-    environment:
-      - PORT=8000
-      - MAX_TIMEOUT=600
-    restart: unless-stopped
+The bundled `docker-compose.yml` already wires up `CLAUDE_CODE_OAUTH_TOKEN`.
+Put your token in a `.env` file next to it (Compose loads it automatically):
+
+```bash
+echo "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-..." > .env
+docker-compose up -d
 ```
 
 Run: `docker-compose up -d` | Stop: `docker-compose down`
@@ -364,8 +375,9 @@ Run: `docker-compose up -d` | Stop: `docker-compose down`
 | `PORT` | Server port | `8000` |
 | `MAX_TIMEOUT` | Request timeout (seconds) | `300` |
 | `CLAUDE_CWD` | Working directory | temp dir |
-| `CLAUDE_AUTH_METHOD` | Auth method: `cli`, `api_key`, `bedrock`, `vertex` | auto-detect |
-| `ANTHROPIC_API_KEY` | Direct Anthropic API key. Optional — also unlocks live `/v1/models` discovery and dynamic latest-Sonnet default. Not required when using Bedrock, Vertex, or Claude CLI subscription auth. | - |
+| `CLAUDE_AUTH_METHOD` | Auth method: `oauth`, `cli`, `api_key`, `bedrock`, `vertex` | auto-detect |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude subscription (Pro/Max/Team) OAuth token from `claude setup-token`. Recommended — no per-token API costs. | - |
+| `ANTHROPIC_API_KEY` | Direct Anthropic API key. Optional — also unlocks live `/v1/models` discovery and dynamic latest-Sonnet default. Not required when using OAuth, Bedrock, Vertex, or Claude CLI subscription auth. | - |
 | `API_KEYS` | Comma-separated client API keys | - |
 | `DEFAULT_MODEL` | Override the default model. When unset and `ANTHROPIC_API_KEY` is configured, the wrapper resolves the latest Sonnet at startup; otherwise falls back to `claude-sonnet-4-6`. | auto |
 | `FAST_MODEL` | Speed/cost-optimized model alias. | `claude-haiku-4-5-20251001` |
@@ -692,7 +704,7 @@ poetry run pytest tests/
 All tests should show:
 - **4/4 endpoint tests passing**
 - **4/4 basic tests passing** 
-- **Authentication method detected** (claude_cli, anthropic, bedrock, or vertex)
+- **Authentication method detected** (oauth, claude_cli, anthropic, bedrock, or vertex)
 - **Real cost tracking** (e.g., $0.001-0.005 per test call)
 - **Accurate token counts** from SDK metadata
 
@@ -704,7 +716,7 @@ This wrapper is designed to be compliant with [Anthropic's Terms of Service](htt
 
 > **Important:** You must have your own valid Claude subscription or API access to use this wrapper.
 
-- **Claude Pro or Max subscription** - For CLI authentication (`claude auth login`)
+- **Claude Pro or Max subscription** - Use OAuth (`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`) or CLI login (`claude auth login`)
 - **Anthropic API key** - Available at [platform.claude.com](https://platform.claude.com)
 - **AWS Bedrock or Google Vertex AI** - For enterprise cloud authentication
 
