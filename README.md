@@ -385,6 +385,11 @@ Run: `docker-compose up -d` | Stop: `docker-compose down`
 | `MODEL_LIST_CACHE_TTL_SECONDS` | Cache TTL for live `/v1/models` results. | `3600` |
 | `MODEL_LIST_ERROR_TTL_SECONDS` | Short cache TTL applied when the live fetch fails, so transient outages don't suppress live discovery for the full hour. | `60` |
 | `MODEL_LIST_REQUEST_TIMEOUT_SECONDS` | HTTP timeout for the live model fetch. | `5` |
+| `METRICS_ENABLED` | Expose Prometheus metrics at `/metrics`. | `true` |
+| `LOKI_URL` | Loki push endpoint (e.g. `http://loki:3100/loki/api/v1/push`). When set, logs are shipped directly to Loki as structured JSON. | - |
+| `LOKI_LABELS` | Extra static Loki stream labels, comma-separated `key=value` (e.g. `env=prod,service=claude-wrapper`). | - |
+| `LOKI_JOB` | Value of the always-present `job` Loki label. | `claude-code-openai-wrapper` |
+| `LOKI_LOG_LEVEL` | Minimum log level shipped to Loki. | `INFO` |
 
 ### Management
 
@@ -401,6 +406,60 @@ docker rm claude-wrapper             # Remove
 curl http://localhost:8000/health
 curl http://localhost:8000/v1/models
 ```
+
+## Observability (Prometheus + Grafana / Loki)
+
+The wrapper ships with first-class hooks for a Grafana observability stack.
+
+### Metrics (Prometheus)
+
+A Prometheus-compatible endpoint is exposed at **`/metrics`** by default
+(disable with `METRICS_ENABLED=false`). It publishes request counts, latency
+histograms, in-progress requests, and request/response sizes, grouped by route
+template and status class so label cardinality stays low.
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+Point Prometheus at it:
+
+```yaml
+scrape_configs:
+  - job_name: claude-wrapper
+    static_configs:
+      - targets: ["claude-wrapper:8000"]
+```
+
+> `/metrics` is intentionally unauthenticated for scraping — keep it on an
+> internal network or behind your scrape proxy.
+
+### Logs (Loki)
+
+Set `LOKI_URL` and the wrapper pushes its logs **directly to Loki** as
+structured JSON — no Promtail/Alloy sidecar required. Shipping runs on a
+background thread with batching, so request handling never blocks on Loki, and
+log failures never crash the app.
+
+```bash
+docker run -d -p 8000:8000 \
+  -e CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-... \
+  -e LOKI_URL=http://loki:3100/loki/api/v1/push \
+  -e LOKI_LABELS=env=prod,service=claude-wrapper \
+  ghcr.io/jeremyhart/claude-code-openai-wrapper:latest
+```
+
+Each log line is JSON (`timestamp`, `level`, `logger`, `message`, and
+`request_id` when available), so in Grafana you can parse and filter with:
+
+```logql
+{job="claude-code-openai-wrapper"} | json | level="ERROR"
+```
+
+Every stream carries a `job` label (override with `LOKI_JOB`) and a `level`
+label, plus any static labels you add via `LOKI_LABELS`. Use `LOKI_LOG_LEVEL`
+to control the minimum level shipped (default `INFO`). Tip: set
+`DEBUG_MODE=true` to also push per-request debug logs to Loki.
 
 ## Usage Examples
 

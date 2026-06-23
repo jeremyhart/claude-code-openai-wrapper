@@ -19,3 +19,8 @@ services:
       # Optional: Set Claude's working directory (defaults to isolated temp dir)
       # Uncomment and modify the line below to set a custom working directory
       # - CLAUDE_CWD=/workspace
+      # Observability for a Grafana stack:
+      #   - Prometheus metrics are served at /metrics (scrape this endpoint).
+      #   - Set LOKI_URL to push logs directly to Loki as structured JSON.
+      - LOKI_URL=${LOKI_URL:-}
+      - LOKI_LABELS=${LOKI_LABELS:-}
