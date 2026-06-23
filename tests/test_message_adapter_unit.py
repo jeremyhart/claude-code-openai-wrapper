@@ -8,7 +8,7 @@ These are pure unit tests that don't require a running server.
 
 import pytest
 from src.message_adapter import MessageAdapter
-from src.models import Message
+from src.models import FunctionCall, Message, ToolCall
 
 
 class TestMessagesToPrompt:
@@ -88,6 +88,65 @@ class TestMessagesToPrompt:
 
         assert prompt == ""
         assert system is None
+
+    def test_tool_result_message_is_rendered(self):
+        """A tool-result message is rendered into the prompt (not dropped)."""
+        messages = [Message(role="tool", content="42", tool_call_id="call_xyz")]
+        prompt, _ = MessageAdapter.messages_to_prompt(messages)
+
+        assert "Tool result for call_xyz" in prompt
+        assert "42" in prompt
+
+    def test_tool_result_falls_back_to_name(self):
+        """A legacy function result without an id references its name."""
+        messages = [Message(role="function", content="ok", name="get_weather")]
+        prompt, _ = MessageAdapter.messages_to_prompt(messages)
+
+        assert "Tool result for get_weather" in prompt
+
+    def test_assistant_tool_call_is_rendered(self):
+        """An assistant tool-call turn renders the call, never 'Assistant: None'."""
+        messages = [
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[ToolCall(id="call_1", function=FunctionCall(name="f", arguments="{}"))],
+            )
+        ]
+        prompt, _ = MessageAdapter.messages_to_prompt(messages)
+
+        assert "Assistant: None" not in prompt
+        assert "Called function `f`" in prompt
+
+    def test_full_tool_calling_round_trip(self):
+        """user -> assistant(tool_calls) -> tool(result) converts coherently.
+
+        This is the end-to-end shape that previously 422'd at validation; here
+        we assert every turn survives into the prompt and no None leaks through.
+        """
+        messages = [
+            Message(role="user", content="What's the weather in Paris?"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        function=FunctionCall(name="get_weather", arguments='{"city": "Paris"}'),
+                    )
+                ],
+            ),
+            Message(role="tool", content='{"temp": 20, "unit": "C"}', tool_call_id="call_1"),
+        ]
+        prompt, _ = MessageAdapter.messages_to_prompt(messages)
+
+        assert "Human: What's the weather in Paris?" in prompt
+        assert "get_weather" in prompt
+        assert "Tool result for call_1" in prompt
+        assert '{"temp": 20, "unit": "C"}' in prompt
+        assert "Assistant: None" not in prompt
+        # Last message is a tool result, so the assistant is nudged to continue.
+        assert "Please continue" in prompt
 
 
 class TestFilterContent:

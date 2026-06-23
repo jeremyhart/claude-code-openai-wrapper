@@ -26,7 +26,11 @@ class MessageAdapter:
             elif message.role == "user":
                 conversation_parts.append(f"Human: {message.content}")
             elif message.role == "assistant":
-                conversation_parts.append(f"Assistant: {message.content}")
+                conversation_parts.append(MessageAdapter._format_assistant_turn(message))
+            elif message.role in ("tool", "function"):
+                # Result of a tool/function call the client executed and sent
+                # back. Render it so Claude can see the output and continue.
+                conversation_parts.append(MessageAdapter._format_tool_result(message))
 
         # Combine all system messages, preserving order.
         system_prompt = "\n\n".join(system_parts) if system_parts else None
@@ -39,6 +43,32 @@ class MessageAdapter:
             prompt += "\n\nHuman: Please continue."
 
         return prompt, system_prompt
+
+    @staticmethod
+    def _format_assistant_turn(message: Message) -> str:
+        """Render an assistant message, including any tool calls it made.
+
+        A function-calling round-trip replays the assistant turn that requested
+        the tool call. That turn frequently has ``content=None`` and carries the
+        call only in ``tool_calls``; rendering the calls keeps the conversation
+        coherent (and avoids emitting the literal string ``"Assistant: None"``).
+        """
+        parts: List[str] = []
+        if message.content:
+            parts.append(message.content)
+        for tool_call in message.tool_calls or []:
+            name = tool_call.function.name
+            arguments = tool_call.function.arguments
+            parts.append(f"[Called function `{name}` with arguments {arguments}]")
+        body = "\n".join(parts)
+        return f"Assistant: {body}"
+
+    @staticmethod
+    def _format_tool_result(message: Message) -> str:
+        """Render a tool/function result the client returned after executing a call."""
+        reference = message.tool_call_id or message.name or "unknown"
+        content = message.content if message.content is not None else ""
+        return f"Tool result for {reference}:\n{content}"
 
     @staticmethod
     def filter_content(content: str) -> str:

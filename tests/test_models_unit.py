@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 from src.models import (
     ContentPart,
+    FunctionCall,
+    ToolCall,
     Message,
     StreamOptions,
     ChatCompletionRequest,
@@ -101,6 +103,43 @@ class TestMessage:
         msg = Message(role="user", content=[])
         assert msg.content == ""
 
+    def test_create_tool_message(self):
+        """Can create a tool-result message (OpenAI function-calling round-trip).
+
+        Regression test: role="tool" used to be rejected by validation, which
+        made it impossible to return a tool result and continue the loop.
+        """
+        msg = Message(role="tool", content='{"temp": 20}', tool_call_id="call_abc123")
+        assert msg.role == "tool"
+        assert msg.content == '{"temp": 20}'
+        assert msg.tool_call_id == "call_abc123"
+
+    def test_create_legacy_function_message(self):
+        """Can create a legacy function-result message (role="function")."""
+        msg = Message(role="function", content="result", name="get_weather")
+        assert msg.role == "function"
+        assert msg.name == "get_weather"
+
+    def test_assistant_message_with_tool_calls(self):
+        """Assistant message can carry tool_calls (the request side of the loop)."""
+        msg = Message(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                ToolCall(
+                    id="call_abc123",
+                    function=FunctionCall(name="get_weather", arguments='{"city": "Paris"}'),
+                )
+            ],
+        )
+        assert msg.tool_calls[0].function.name == "get_weather"
+        assert msg.tool_call_id is None
+
+    def test_invalid_role_is_rejected(self):
+        """An unknown role still fails validation (the Literal stays strict)."""
+        with pytest.raises(Exception):
+            Message(role="banana", content="hello")
+
 
 class TestStreamOptions:
     """Test StreamOptions model."""
@@ -123,6 +162,32 @@ class TestChatCompletionRequest:
         """Can create request with just messages."""
         request = ChatCompletionRequest(messages=[Message(role="user", content="Hi")])
         assert len(request.messages) == 1
+
+    def test_request_accepts_tool_role_round_trip(self):
+        """Regression: a tool-result message in the conversation must validate.
+
+        Reproduces the 422 ("Input should be 'system','user' or 'assistant'")
+        that broke OpenAI function-calling round-trips when a client sent the
+        tool output back as a role="tool" message.
+        """
+        request = ChatCompletionRequest(
+            messages=[
+                Message(role="user", content="weather in Paris?"),
+                Message(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        ToolCall(
+                            id="call_1",
+                            function=FunctionCall(name="get_weather", arguments="{}"),
+                        )
+                    ],
+                ),
+                Message(role="tool", content="sunny", tool_call_id="call_1"),
+            ]
+        )
+        assert request.messages[-1].role == "tool"
+        assert request.messages[-1].tool_call_id == "call_1"
 
     def test_default_model(self):
         """Default model is set from constants."""
