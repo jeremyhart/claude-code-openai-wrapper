@@ -151,6 +151,27 @@ class TestLokiHandlerShipping:
         finally:
             handler.close()
 
+    def test_httpx_transport_logs_are_not_shipped(self):
+        # The handler POSTs via httpx; httpx's own request logs must be dropped to
+        # avoid an endless shipping feedback loop.
+        handler = obs.LokiHandler(
+            url="http://127.0.0.1:9/loki/api/v1/push",
+            labels={"job": "test"},
+        )
+        handler.setFormatter(obs.JsonLogFormatter())
+        try:
+            for name in ("httpx", "httpcore.connection", "httpx._client"):
+                record = logging.LogRecord(name, logging.INFO, "f.py", 1, "HTTP Request", (), None)
+                handler.emit(record)
+            assert handler._queue.qsize() == 0
+
+            # A normal app log is still queued.
+            record = logging.LogRecord("src.main", logging.INFO, "f.py", 1, "hello", (), None)
+            handler.emit(record)
+            assert handler._queue.qsize() == 1
+        finally:
+            handler.close()
+
 
 class TestSetupMetrics:
     def test_metrics_endpoint_exposed(self, monkeypatch):
