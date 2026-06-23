@@ -46,8 +46,8 @@ class TestMessagesToPrompt:
         assert system == "You are a helpful assistant."
         assert "Human: Hello" in prompt
 
-    def test_multiple_system_messages_uses_last(self):
-        """Multiple system messages use the last one."""
+    def test_multiple_system_messages_are_combined(self):
+        """All system messages are preserved and combined in order."""
         messages = [
             Message(role="system", content="First system message"),
             Message(role="user", content="Hello"),
@@ -55,7 +55,10 @@ class TestMessagesToPrompt:
         ]
         prompt, system = MessageAdapter.messages_to_prompt(messages)
 
-        assert system == "Second system message"
+        # Both system messages must survive - dropping earlier ones strips context.
+        assert system == "First system message\n\nSecond system message"
+        assert "First system message" in system
+        assert "Second system message" in system
 
     def test_last_message_not_user_adds_continue(self):
         """If last message isn't from user, adds 'Please continue'."""
