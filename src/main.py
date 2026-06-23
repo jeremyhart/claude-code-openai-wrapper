@@ -6,7 +6,7 @@ import secrets
 import string
 import time
 import uuid
-from typing import Optional, AsyncGenerator, Dict, Any, List, Iterator
+from typing import Optional, AsyncGenerator, Dict, Any, List, Iterator, Literal
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -1003,7 +1003,9 @@ async def generate_streaming_response(
 
             # Decide the per-choice finish reason. Default "stop"; switches to
             # "tool_calls" when tools were requested and a tool call was parsed.
-            choice_finish_reason = "stop"
+            choice_finish_reason: Literal[
+                "stop", "length", "content_filter", "tool_calls", "null"
+            ] = "stop"
 
             if tool_prompt:
                 # Decide whether the buffered response is a prompt-based tool
