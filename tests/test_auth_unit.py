@@ -117,7 +117,13 @@ class TestClaudeCodeAuthManagerDetectMethod:
         env_copy = {
             k: v
             for k, v in os.environ.items()
-            if k not in ["CLAUDE_AUTH_METHOD", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"]
+            if k
+            not in [
+                "CLAUDE_AUTH_METHOD",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+            ]
         }
         env_copy.update(env)
         with patch.dict(os.environ, env_copy, clear=True):
@@ -134,6 +140,7 @@ class TestClaudeCodeAuthManagerDetectMethod:
             if k
             not in [
                 "CLAUDE_AUTH_METHOD",
+                "CLAUDE_CODE_OAUTH_TOKEN",
                 "CLAUDE_CODE_USE_BEDROCK",
                 "CLAUDE_CODE_USE_VERTEX",
                 "ANTHROPIC_API_KEY",
@@ -144,6 +151,61 @@ class TestClaudeCodeAuthManagerDetectMethod:
 
             importlib.reload(src.auth)
             assert src.auth.auth_manager.auth_method == "claude_cli"
+
+    def test_auto_detect_oauth_token(self):
+        """CLAUDE_CODE_OAUTH_TOKEN auto-detects to oauth."""
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "x" * 40}
+        env_copy = {
+            k: v
+            for k, v in os.environ.items()
+            if k
+            not in [
+                "CLAUDE_AUTH_METHOD",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+            ]
+        }
+        env_copy.update(env)
+        with patch.dict(os.environ, env_copy, clear=True):
+            import src.auth
+
+            importlib.reload(src.auth)
+            assert src.auth.auth_manager.auth_method == "oauth"
+
+    def test_oauth_preferred_over_anthropic_key(self):
+        """OAuth token takes precedence over ANTHROPIC_API_KEY when both are set."""
+        env = {
+            "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "x" * 40,
+            "ANTHROPIC_API_KEY": "test-key-12345678901234567890",
+        }
+        env_copy = {
+            k: v
+            for k, v in os.environ.items()
+            if k
+            not in [
+                "CLAUDE_AUTH_METHOD",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+            ]
+        }
+        env_copy.update(env)
+        with patch.dict(os.environ, env_copy, clear=True):
+            import src.auth
+
+            importlib.reload(src.auth)
+            assert src.auth.auth_manager.auth_method == "oauth"
+
+    def test_explicit_oauth_method(self):
+        """CLAUDE_AUTH_METHOD=oauth uses oauth."""
+        with patch.dict(
+            os.environ,
+            {"CLAUDE_AUTH_METHOD": "oauth", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "x" * 40},
+            clear=False,
+        ):
+            import src.auth
+
+            importlib.reload(src.auth)
+            assert src.auth.auth_manager.auth_method == "oauth"
 
 
 class TestClaudeCodeAuthManagerValidation:
@@ -272,6 +334,46 @@ class TestClaudeCodeAuthManagerValidation:
             assert status["valid"] is True
             assert status["method"] == "claude_cli"
 
+    def test_validate_oauth_valid(self):
+        """A present OAuth token passes validation."""
+        with patch.dict(
+            os.environ,
+            {
+                "CLAUDE_AUTH_METHOD": "oauth",
+                "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "x" * 40,
+            },
+        ):
+            import src.auth
+
+            importlib.reload(src.auth)
+            status = src.auth.auth_manager.auth_status
+            assert status["valid"] is True
+            assert status["method"] == "oauth"
+
+    def test_validate_oauth_missing_token(self):
+        """oauth method without a token fails with a helpful error."""
+        env_copy = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_OAUTH_TOKEN"}
+        env_copy["CLAUDE_AUTH_METHOD"] = "oauth"
+        with patch.dict(os.environ, env_copy, clear=True):
+            import src.auth
+
+            importlib.reload(src.auth)
+            status = src.auth.auth_manager.auth_status
+            assert status["valid"] is False
+            assert "setup-token" in status["errors"][0]
+
+    def test_validate_oauth_short_token(self):
+        """A too-short OAuth token fails validation."""
+        with patch.dict(
+            os.environ,
+            {"CLAUDE_AUTH_METHOD": "oauth", "CLAUDE_CODE_OAUTH_TOKEN": "short"},
+        ):
+            import src.auth
+
+            importlib.reload(src.auth)
+            status = src.auth.auth_manager.auth_status
+            assert status["valid"] is False
+
 
 class TestClaudeCodeAuthManagerEnvVars:
     """Test get_claude_code_env_vars()"""
@@ -291,6 +393,22 @@ class TestClaudeCodeAuthManagerEnvVars:
             env_vars = src.auth.auth_manager.get_claude_code_env_vars()
             assert "ANTHROPIC_API_KEY" in env_vars
             assert env_vars["ANTHROPIC_API_KEY"] == "test-key-12345"
+
+    def test_oauth_env_vars(self):
+        """OAuth method forwards only CLAUDE_CODE_OAUTH_TOKEN to the SDK."""
+        token = "sk-ant-oat01-" + "x" * 40
+        with patch.dict(
+            os.environ,
+            {
+                "CLAUDE_AUTH_METHOD": "oauth",
+                "CLAUDE_CODE_OAUTH_TOKEN": token,
+            },
+        ):
+            import src.auth
+
+            importlib.reload(src.auth)
+            env_vars = src.auth.auth_manager.get_claude_code_env_vars()
+            assert env_vars == {"CLAUDE_CODE_OAUTH_TOKEN": token}
 
     def test_bedrock_env_vars(self):
         """Bedrock method returns AWS credentials."""

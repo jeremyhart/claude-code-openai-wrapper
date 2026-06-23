@@ -334,9 +334,13 @@ async def lifespan(app: FastAPI):
         for error in auth_info.get("errors", []):
             logger.error(f"  - {error}")
         logger.warning("Authentication setup guide:")
-        logger.warning("  1. For Anthropic API: Set ANTHROPIC_API_KEY")
-        logger.warning("  2. For Bedrock: Set CLAUDE_CODE_USE_BEDROCK=1 + AWS credentials")
-        logger.warning("  3. For Vertex AI: Set CLAUDE_CODE_USE_VERTEX=1 + GCP credentials")
+        logger.warning(
+            "  1. For Claude subscription (Pro/Max): Run `claude setup-token` and set "
+            "CLAUDE_CODE_OAUTH_TOKEN"
+        )
+        logger.warning("  2. For Anthropic API: Set ANTHROPIC_API_KEY")
+        logger.warning("  3. For Bedrock: Set CLAUDE_CODE_USE_BEDROCK=1 + AWS credentials")
+        logger.warning("  4. For Vertex AI: Set CLAUDE_CODE_USE_VERTEX=1 + GCP credentials")
     else:
         logger.info(f"✅ Claude Code authentication validated: {auth_info['method']}")
 

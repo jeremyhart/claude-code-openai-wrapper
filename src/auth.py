@@ -46,6 +46,9 @@ class ClaudeCodeAuthManager:
             method_map = {
                 "cli": "claude_cli",
                 "claude_cli": "claude_cli",
+                "oauth": "oauth",
+                "subscription": "oauth",
+                "token": "oauth",
                 "api_key": "anthropic",
                 "anthropic": "anthropic",
                 "bedrock": "bedrock",
@@ -64,6 +67,12 @@ class ClaudeCodeAuthManager:
             return "bedrock"
         elif os.getenv("CLAUDE_CODE_USE_VERTEX") == "1":
             return "vertex"
+        elif os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
+            # Claude subscription (Pro/Max/Team) OAuth token from `claude setup-token`.
+            # Detected before ANTHROPIC_API_KEY so subscription auth is preferred when a
+            # token is present (ANTHROPIC_API_KEY may still be set purely for /v1/models
+            # live discovery).
+            return "oauth"
         elif os.getenv("ANTHROPIC_API_KEY"):
             return "anthropic"
         else:
@@ -77,6 +86,8 @@ class ClaudeCodeAuthManager:
 
         if method == "anthropic":
             status.update(self._validate_anthropic_auth())
+        elif method == "oauth":
+            status.update(self._validate_oauth_auth())
         elif method == "bedrock":
             status.update(self._validate_bedrock_auth())
         elif method == "vertex":
@@ -109,6 +120,41 @@ class ClaudeCodeAuthManager:
             "valid": True,
             "errors": [],
             "config": {"api_key_present": True, "api_key_length": len(api_key)},
+        }
+
+    def _validate_oauth_auth(self) -> Dict[str, Any]:
+        """Validate Claude subscription OAuth token authentication.
+
+        The token is generated with `claude setup-token` (Pro/Max/Team/Enterprise
+        plans) and consumed directly by the Claude Agent SDK via the
+        CLAUDE_CODE_OAUTH_TOKEN environment variable.
+        """
+        token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+        if not token:
+            return {
+                "valid": False,
+                "errors": [
+                    "CLAUDE_CODE_OAUTH_TOKEN environment variable not set. "
+                    "Generate one with `claude setup-token`."
+                ],
+                "config": {},
+            }
+
+        if len(token) < 10:  # Basic sanity check
+            return {
+                "valid": False,
+                "errors": ["CLAUDE_CODE_OAUTH_TOKEN appears to be invalid (too short)"],
+                "config": {},
+            }
+
+        return {
+            "valid": True,
+            "errors": [],
+            "config": {
+                "method": "Claude subscription OAuth token",
+                "token_present": True,
+                "token_length": len(token),
+            },
         }
 
     def _validate_bedrock_auth(self) -> Dict[str, Any]:
@@ -189,6 +235,10 @@ class ClaudeCodeAuthManager:
         if self.auth_method == "anthropic":
             if os.getenv("ANTHROPIC_API_KEY"):
                 env_vars["ANTHROPIC_API_KEY"] = os.getenv("ANTHROPIC_API_KEY")
+
+        elif self.auth_method == "oauth":
+            if os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
+                env_vars["CLAUDE_CODE_OAUTH_TOKEN"] = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
 
         elif self.auth_method == "bedrock":
             env_vars["CLAUDE_CODE_USE_BEDROCK"] = "1"
