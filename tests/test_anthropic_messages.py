@@ -57,6 +57,64 @@ class TestAnthropicMessagesModels:
         assert request.max_tokens == 100
         assert request.system == "You are helpful"
 
+    def test_system_prompt_as_string(self):
+        """A string system prompt is returned unchanged."""
+        from src.models import AnthropicMessagesRequest, AnthropicMessage
+
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5-20250929",
+            messages=[AnthropicMessage(role="user", content="Hi")],
+            system="You are helpful",
+        )
+
+        assert request.get_system_prompt() == "You are helpful"
+
+    def test_system_prompt_as_block_array(self):
+        """A block-form system prompt (Anthropic spec) is flattened to a string."""
+        from src.models import AnthropicMessagesRequest, AnthropicMessage
+
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5-20250929",
+            messages=[AnthropicMessage(role="user", content="Hi")],
+            system=[
+                {"type": "text", "text": "You are a pirate."},
+                {"type": "text", "text": "Always answer in one sentence."},
+            ],
+        )
+
+        assert request.get_system_prompt() == (
+            "You are a pirate.\nAlways answer in one sentence."
+        )
+
+    def test_system_block_allows_cache_control(self):
+        """Block-form system prompts with cache_control validate (extra keys allowed)."""
+        from src.models import AnthropicMessagesRequest, AnthropicMessage
+
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5-20250929",
+            messages=[AnthropicMessage(role="user", content="Hi")],
+            system=[
+                {
+                    "type": "text",
+                    "text": "Large persona.",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        )
+
+        assert request.get_system_prompt() == "Large persona."
+
+    def test_system_prompt_none(self):
+        """A missing system prompt flattens to None."""
+        from src.models import AnthropicMessagesRequest, AnthropicMessage
+
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5-20250929",
+            messages=[AnthropicMessage(role="user", content="Hi")],
+        )
+
+        assert request.get_system_prompt() is None
+
     def test_anthropic_messages_request_to_openai(self):
         """Test conversion from Anthropic to OpenAI message format."""
         from src.models import AnthropicMessagesRequest, AnthropicMessage

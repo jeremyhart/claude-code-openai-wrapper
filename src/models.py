@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from datetime import datetime
 import uuid
 import logging
@@ -429,7 +429,13 @@ class MCPToolCallRequest(BaseModel):
 
 
 class AnthropicTextBlock(BaseModel):
-    """Anthropic text content block."""
+    """Anthropic text content block.
+
+    Allows extra keys (e.g. ``cache_control``) so block-form payloads from
+    native Anthropic clients validate instead of being rejected.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     type: Literal["text"] = "text"
     text: str
@@ -448,7 +454,10 @@ class AnthropicMessagesRequest(BaseModel):
     model: str
     messages: List[AnthropicMessage]
     max_tokens: int = Field(default=4096, description="Maximum tokens to generate")
-    system: Optional[str] = Field(default=None, description="System prompt")
+    system: Optional[Union[str, List[AnthropicTextBlock]]] = Field(
+        default=None,
+        description="System prompt (string or array of text blocks, per the Anthropic spec)",
+    )
     temperature: Optional[float] = Field(default=1.0, ge=0, le=1)
     top_p: Optional[float] = Field(default=None, ge=0, le=1)
     top_k: Optional[int] = Field(default=None, ge=0)
@@ -469,6 +478,20 @@ class AnthropicMessagesRequest(BaseModel):
                 content = "\n".join(text_parts)
             result.append(Message(role=msg.role, content=content))
         return result
+
+    def get_system_prompt(self) -> Optional[str]:
+        """Return the system prompt as a flat string.
+
+        The Anthropic Messages API allows ``system`` to be either a plain
+        string or an array of text blocks; flatten the block form the same
+        way message content is flattened in ``to_openai_messages``.
+        """
+        if isinstance(self.system, list):
+            text_parts = [
+                block.text for block in self.system if isinstance(block, AnthropicTextBlock)
+            ]
+            return "\n".join(text_parts)
+        return self.system
 
 
 class AnthropicUsage(BaseModel):
