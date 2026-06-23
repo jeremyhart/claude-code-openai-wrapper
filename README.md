@@ -544,6 +544,13 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 # Output: Claude will actually read your directory and list the files!
 
+# Server-wide tool configuration (no per-request flag needed):
+#   ENABLE_TOOLS=true        flips the default so tools are on unless a
+#                            request explicitly sends "enable_tools": false
+#   ALLOWED_TOOLS=Read,Grep  override the safe tool subset (comma-separated)
+#   DISALLOWED_TOOLS=Task    override the tools blocked by default
+# See .env.example for the full list of valid tool names.
+
 # Check real costs and tokens
 print(f"Cost: ${response.usage.total_tokens * 0.000003:.6f}")  # Real cost tracking
 print(f"Tokens: {response.usage.total_tokens} ({response.usage.prompt_tokens} + {response.usage.completion_tokens})")

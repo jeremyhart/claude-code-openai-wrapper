@@ -49,8 +49,12 @@ CLAUDE_TOOLS = [
 ]
 
 # Default tools to allow when tools are enabled
-# Subset of CLAUDE_TOOLS that are safe and commonly used
-DEFAULT_ALLOWED_TOOLS = [
+# Subset of CLAUDE_TOOLS that are safe and commonly used.
+#
+# Operators can override this list without rebuilding the image via the
+# ALLOWED_TOOLS environment variable (comma-separated), e.g.:
+#   ALLOWED_TOOLS=Read,Grep,Bash
+_DEFAULT_ALLOWED_TOOLS_FALLBACK = [
     "Read",
     "Glob",
     "Grep",
@@ -59,12 +63,53 @@ DEFAULT_ALLOWED_TOOLS = [
     "Edit",
 ]
 
-# Tools to disallow by default (potentially dangerous or slow)
-DEFAULT_DISALLOWED_TOOLS = [
+# Tools to disallow by default (potentially dangerous or slow).
+#
+# Operators can override this list via the DISALLOWED_TOOLS environment
+# variable (comma-separated), e.g.:
+#   DISALLOWED_TOOLS=Task,WebFetch,WebSearch,KillShell
+_DEFAULT_DISALLOWED_TOOLS_FALLBACK = [
     "Task",  # Can spawn sub-agents
     "WebFetch",  # External network access
     "WebSearch",  # External network access
 ]
+
+
+def _parse_tools_env(env_var: str, fallback: list) -> list:
+    """
+    Parse a comma-separated list of tool names from an environment variable.
+
+    Unknown tool names (not in CLAUDE_TOOLS) are dropped with a warning so a
+    typo doesn't silently enable/disable nothing. Returns the fallback list
+    when the variable is unset or empty.
+    """
+    raw = os.getenv(env_var, "").strip()
+    if not raw:
+        return list(fallback)
+
+    parsed = []
+    for name in (part.strip() for part in raw.split(",")):
+        if not name:
+            continue
+        if name in CLAUDE_TOOLS:
+            parsed.append(name)
+        else:
+            import warnings
+
+            warnings.warn(
+                f"{env_var}: ignoring unknown tool '{name}' "
+                f"(valid tools: {', '.join(CLAUDE_TOOLS)})"
+            )
+    return parsed
+
+
+DEFAULT_ALLOWED_TOOLS = _parse_tools_env("ALLOWED_TOOLS", _DEFAULT_ALLOWED_TOOLS_FALLBACK)
+DEFAULT_DISALLOWED_TOOLS = _parse_tools_env("DISALLOWED_TOOLS", _DEFAULT_DISALLOWED_TOOLS_FALLBACK)
+
+# Default for the per-request `enable_tools` flag. When ENABLE_TOOLS is truthy,
+# tools are enabled even if the request omits `enable_tools`. Individual
+# requests can still override this either way.
+ENABLE_TOOLS_DEFAULT = os.getenv("ENABLE_TOOLS", "false").lower() in ("true", "1", "yes", "on")
 
 # Claude Models
 # Static fallback models exposed by /v1/models and accepted by validation when
