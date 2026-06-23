@@ -630,6 +630,101 @@ class TestClaudeCodeCLIRunCompletion:
             assert opts.system_prompt == "You are helpful"
 
     @pytest.mark.asyncio
+    async def test_large_system_prompt_uses_file(self, cli_instance):
+        """An oversized system prompt is passed via --append-system-prompt-file.
+
+        Linux caps a single argv string at ~128KB, so a large system prompt
+        must not be passed inline as --system-prompt (that crashes the
+        subprocess with [Errno 7] Argument list too long).
+        """
+        import os
+        from src.claude_cli import MAX_CLI_ARG_BYTES
+
+        big_system = "S" * (MAX_CLI_ARG_BYTES + 1000)
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            # Capture the temp file's existence/content while the call is live.
+            path = options.extra_args["append-system-prompt-file"]
+            captured_options.append(("path", path, os.path.exists(path)))
+            with open(path, encoding="utf-8") as fh:
+                captured_options.append(("content", fh.read()))
+            yield {"type": "assistant", "content": "ok"}
+
+        with patch("src.claude_cli.query", mock_query):
+            async for _ in cli_instance.run_completion(
+                "Hello", system_prompt=big_system, use_claude_code_preset=False
+            ):
+                pass
+
+        opts = captured_options[0]
+        # Inline system prompt is emptied; the big content moves to the file.
+        assert opts.system_prompt == ""
+        assert "append-system-prompt-file" in opts.extra_args
+        assert captured_options[1][2] is True  # file existed during the call
+        assert captured_options[2][1] == big_system  # file held the full prompt
+        # ...and is cleaned up afterward.
+        assert not os.path.exists(captured_options[1][1])
+
+    @pytest.mark.asyncio
+    async def test_small_system_prompt_stays_inline(self, cli_instance):
+        """A normal-sized system prompt is still passed inline (no temp file)."""
+        captured_options = []
+
+        async def mock_query(prompt, options):
+            captured_options.append(options)
+            yield {"type": "assistant", "content": "ok"}
+
+        with patch("src.claude_cli.query", mock_query):
+            async for _ in cli_instance.run_completion(
+                "Hello", system_prompt="be brief", use_claude_code_preset=False
+            ):
+                pass
+
+        opts = captured_options[0]
+        assert opts.system_prompt == "be brief"
+        assert opts.extra_args == {}  # no file redirection
+
+    @pytest.mark.asyncio
+    async def test_large_prompt_streams_via_stdin(self, cli_instance):
+        """An oversized user prompt is streamed via stdin, not placed on argv."""
+        from src.claude_cli import MAX_CLI_ARG_BYTES
+
+        big_prompt = "P" * (MAX_CLI_ARG_BYTES + 1000)
+        captured = {}
+
+        async def mock_query(prompt, options):
+            captured["prompt"] = prompt
+            yield {"type": "assistant", "content": "ok"}
+
+        with patch("src.claude_cli.query", mock_query):
+            async for _ in cli_instance.run_completion(big_prompt):
+                pass
+
+        # Not a string => streaming-input (stdin) mode.
+        assert not isinstance(captured["prompt"], str)
+        collected = [msg async for msg in captured["prompt"]]
+        assert collected == [
+            {"type": "user", "message": {"role": "user", "content": big_prompt}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_small_prompt_passed_as_string(self, cli_instance):
+        """A normal-sized prompt is still passed as a plain string (argv path)."""
+        captured = {}
+
+        async def mock_query(prompt, options):
+            captured["prompt"] = prompt
+            yield {"type": "assistant", "content": "ok"}
+
+        with patch("src.claude_cli.query", mock_query):
+            async for _ in cli_instance.run_completion("hi there"):
+                pass
+
+        assert captured["prompt"] == "hi there"
+
+    @pytest.mark.asyncio
     async def test_run_completion_with_model(self, cli_instance):
         """run_completion sets model option."""
         mock_message = {"type": "assistant"}

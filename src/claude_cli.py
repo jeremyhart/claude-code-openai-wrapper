@@ -11,6 +11,18 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 logger = logging.getLogger(__name__)
 
 
+# The Claude Agent SDK passes the system prompt and the user prompt to the
+# `claude` CLI as command-line arguments (``--system-prompt <str>`` and
+# ``--print -- <prompt>``). Linux caps a single argv string at ~128KB
+# (MAX_ARG_STRLEN); exceeding it makes the subprocess spawn fail with
+# ``[Errno 7] Argument list too long``. When a prompt is larger than this
+# threshold we route it off the command line instead (system prompt → a temp
+# file via ``--append-system-prompt-file``; user prompt → stdin via the SDK's
+# streaming-input mode). The threshold is set below the hard limit to leave
+# headroom for the flag name, other arguments, and the environment block.
+MAX_CLI_ARG_BYTES = 96 * 1024
+
+
 class ClaudeCodeCLI:
     def __init__(self, timeout: int = 600000, cwd: Optional[str] = None):
         self.timeout = timeout / 1000  # Convert ms to seconds
@@ -116,6 +128,9 @@ class ClaudeCodeCLI:
                     original_env[key] = os.environ.get(key)
                     os.environ[key] = value
 
+            # Temp file holding an oversized system prompt (cleaned up below).
+            system_prompt_file = None
+
             try:
                 # Build SDK options
                 options = ClaudeAgentOptions(max_turns=max_turns, cwd=self.cwd)
@@ -131,7 +146,29 @@ class ClaudeCodeCLI:
                 # {"type": "text", "text": ...}; that shape falls through the
                 # SDK's handling and the system prompt is silently dropped, so a
                 # custom prompt must be passed as a plain string.
-                if system_prompt:
+                if system_prompt and len(system_prompt.encode("utf-8")) > MAX_CLI_ARG_BYTES:
+                    # Too large for a single CLI argument: write it to a temp
+                    # file and append it via --append-system-prompt-file (with an
+                    # empty inline base). This fully provides the system prompt,
+                    # exactly like the inline form, without the argv-length limit.
+                    system_prompt_file = tempfile.NamedTemporaryFile(
+                        mode="w",
+                        suffix=".txt",
+                        prefix="claude_system_prompt_",
+                        delete=False,
+                        encoding="utf-8",
+                    )
+                    system_prompt_file.write(system_prompt)
+                    system_prompt_file.close()
+                    options.system_prompt = ""
+                    options.extra_args = {
+                        "append-system-prompt-file": system_prompt_file.name
+                    }
+                    logger.info(
+                        f"System prompt is large ({len(system_prompt)} chars); "
+                        "passing via --append-system-prompt-file to avoid arg-length limits"
+                    )
+                elif system_prompt:
                     options.system_prompt = system_prompt
                 elif use_claude_code_preset:
                     # Use Claude Code preset to maintain expected behavior
@@ -159,8 +196,25 @@ class ClaudeCodeCLI:
                 elif session_id:
                     options.resume = session_id
 
+                # A very large prompt would also overflow the CLI argument limit
+                # (it is passed positionally as "--print -- <prompt>"). When it
+                # exceeds the threshold, feed it through stdin using the SDK's
+                # streaming-input mode instead of the command line.
+                if isinstance(prompt, str) and len(prompt.encode("utf-8")) > MAX_CLI_ARG_BYTES:
+
+                    async def _prompt_stream(text=prompt):
+                        yield {"type": "user", "message": {"role": "user", "content": text}}
+
+                    query_prompt: Any = _prompt_stream()
+                    logger.info(
+                        f"Prompt is large ({len(prompt)} chars); "
+                        "streaming via stdin to avoid arg-length limits"
+                    )
+                else:
+                    query_prompt = prompt
+
                 # Run the query and yield messages
-                async for message in query(prompt=prompt, options=options):
+                async for message in query(prompt=query_prompt, options=options):
                     # Debug logging
                     logger.debug(f"Raw SDK message type: {type(message)}")
                     logger.debug(f"Raw SDK message: {message}")
@@ -186,6 +240,13 @@ class ClaudeCodeCLI:
                         yield message
 
             finally:
+                # Remove the oversized-system-prompt temp file, if any.
+                if system_prompt_file is not None:
+                    try:
+                        os.unlink(system_prompt_file.name)
+                    except OSError:
+                        pass
+
                 # Restore original environment (if we changed anything)
                 if original_env:
                     for key, original_value in original_env.items():
