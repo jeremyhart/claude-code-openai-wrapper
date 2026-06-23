@@ -202,7 +202,9 @@ class TestToolEnvOverrides:
         constants = self._reload_constants({"ALLOWED_TOOLS": "", "DISALLOWED_TOOLS": ""})
         try:
             assert constants.DEFAULT_ALLOWED_TOOLS == constants._DEFAULT_ALLOWED_TOOLS_FALLBACK
-            assert constants.DEFAULT_DISALLOWED_TOOLS == constants._DEFAULT_DISALLOWED_TOOLS_FALLBACK
+            assert (
+                constants.DEFAULT_DISALLOWED_TOOLS == constants._DEFAULT_DISALLOWED_TOOLS_FALLBACK
+            )
         finally:
             self._reload_constants({})
 
