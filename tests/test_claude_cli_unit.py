@@ -705,9 +705,7 @@ class TestClaudeCodeCLIRunCompletion:
         # Not a string => streaming-input (stdin) mode.
         assert not isinstance(captured["prompt"], str)
         collected = [msg async for msg in captured["prompt"]]
-        assert collected == [
-            {"type": "user", "message": {"role": "user", "content": big_prompt}}
-        ]
+        assert collected == [{"type": "user", "message": {"role": "user", "content": big_prompt}}]
 
     @pytest.mark.asyncio
     async def test_small_prompt_passed_as_string(self, cli_instance):

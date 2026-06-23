@@ -161,9 +161,7 @@ class ClaudeCodeCLI:
                     system_prompt_file.write(system_prompt)
                     system_prompt_file.close()
                     options.system_prompt = ""
-                    options.extra_args = {
-                        "append-system-prompt-file": system_prompt_file.name
-                    }
+                    options.extra_args = {"append-system-prompt-file": system_prompt_file.name}
                     logger.info(
                         f"System prompt is large ({len(system_prompt)} chars); "
                         "passing via --append-system-prompt-file to avoid arg-length limits"
