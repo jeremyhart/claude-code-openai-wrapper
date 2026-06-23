@@ -1,10 +1,10 @@
 # Claude Code OpenAI API Wrapper
 
-An OpenAI API-compatible wrapper for Claude Code, allowing you to use Claude Code with any OpenAI client library. **Now powered by the official Claude Agent SDK v0.1.18** with enhanced authentication and features.
+An OpenAI API-compatible wrapper for Claude Code, allowing you to use Claude Code with any OpenAI client library. **Now powered by the official Claude Agent SDK v0.2.107** with enhanced authentication and features.
 
 ## Version
 
-**Current Version:** 2.3.0
+**Current Version:** 2.4.0
 - **Live `/v1/models` discovery:** When `ANTHROPIC_API_KEY` is set, the wrapper fetches Anthropic's live model list (cached) instead of serving the static fallback
 - **Dynamic default Sonnet:** `DEFAULT_MODEL` resolves to the latest Sonnet at startup when `ANTHROPIC_API_KEY` is configured; falls back to `claude-sonnet-4-6` otherwise
 - **Operator overrides:** New `CLAUDE_MODELS_OVERRIDE`, `FAST_MODEL`, and `MODEL_LIST_*` env vars
@@ -22,7 +22,7 @@ An OpenAI API-compatible wrapper for Claude Code, allowing you to use Claude Cod
 ## Status
 
 🎉 **Production Ready** - All core features working and tested:
-- ✅ Chat completions endpoint with **official Claude Agent SDK v0.1.18**
+- ✅ Chat completions endpoint with **official Claude Agent SDK v0.2.107**
 - ✅ **Anthropic Messages API** (`/v1/messages`) for native compatibility
 - ✅ Streaming and non-streaming responses
 - ✅ Full OpenAI SDK compatibility
@@ -48,7 +48,7 @@ An OpenAI API-compatible wrapper for Claude Code, allowing you to use Claude Cod
 - Automatic model validation and selection
 
 ### 🛠 **Claude Agent SDK Integration**
-- **Official Claude Agent SDK** integration (v0.1.18) 🆕
+- **Official Claude Agent SDK** integration (v0.2.107) 🆕
 - **Real-time cost tracking** - actual costs from SDK metadata
 - **Accurate token counting** - input/output tokens from SDK
 - **Session management** - proper session IDs and continuity
@@ -129,7 +129,7 @@ poetry run python test_endpoints.py
      ```
    - **Option D**: Use AWS Bedrock or Google Vertex AI (see Configuration section)
 
-> **Note:** The Claude Code CLI is bundled with the SDK (v0.1.18+). No separate Node.js or npm installation required!
+> **Note:** The Claude CLI is bundled with the SDK (v0.2.107 bundles Claude CLI v2.1.186). No separate Node.js or npm installation required!
 
 ## Installation
 
@@ -722,7 +722,7 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 - **Tool Execution Fix**: `enable_tools: true` now works correctly
 
 ### ✅ **v2.0.0 - v2.1.0 Features**
-- Claude Agent SDK v0.1.18 with bundled CLI
+- Claude Agent SDK v0.2.107 with bundled Claude CLI v2.1.186
 - Multi-provider auth (CLI, API key, Bedrock, Vertex AI)
 - Session continuity and management
 - Real-time cost and token tracking

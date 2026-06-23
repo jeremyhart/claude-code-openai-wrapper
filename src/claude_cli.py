@@ -192,7 +192,7 @@ class ClaudeCodeCLI:
 
                 # Handle session continuity
                 if continue_session:
-                    options.continue_session = True
+                    options.continue_conversation = True
                 elif session_id:
                     options.resume = session_id
 

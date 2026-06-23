@@ -1,5 +1,7 @@
 # Claude Code OpenAI Wrapper - Upgrade Plan
 
+> **Update (2026-06-23):** This plan documents the original `claude-code-sdk 0.0.14` → `claude-agent-sdk 0.1.6` migration and is retained as a historical record. The project has since upgraded to **claude-agent-sdk 0.2.107** (which bundles Claude CLI v2.1.186), with the project version bumped to 2.4.0. The version numbers in the historical sections below reflect the original migration and are left unchanged.
+
 **Date:** 2025-11-02
 **Current Version:** claude-code-sdk 0.0.14
 **Target Version:** claude-agent-sdk 0.1.6

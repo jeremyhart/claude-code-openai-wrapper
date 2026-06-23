@@ -76,7 +76,7 @@ All code changes have been successfully implemented:
 
 **The hanging issue is environmental, not a code problem.**
 
-When deployed to a proper environment (not inside Claude Code), the wrapper will work as expected with the new Claude Agent SDK v0.1.6.
+When deployed to a proper environment (not inside Claude Code), the wrapper will work as expected with the Claude Agent SDK. (The wrapper has since been upgraded to claude-agent-sdk 0.2.107, which bundles Claude CLI v2.1.186.)
 
 ## 📋 Deployment Checklist
 
