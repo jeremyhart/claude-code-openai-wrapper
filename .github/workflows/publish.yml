@@ -58,3 +58,9 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Notify ServiceRoute to redeploy the stack now that a new image is published.
+      - name: Trigger ServiceRoute redeploy webhook
+        run: |
+          curl --fail --silent --show-error --request POST \
+            "https://port.serviceroute.io/api/stacks/webhooks/3f22f854-9fee-4f31-8e52-b6e381242754"
