@@ -48,6 +48,7 @@ from src.parameter_validator import ParameterValidator, CompatibilityReporter
 from src.session_manager import session_manager
 from src.tool_manager import tool_manager
 from src.mcp_client import mcp_client, MCPServerConfig
+from src.observability import setup_metrics, setup_loki_logging
 from src.rate_limiter import (
     limiter,
     rate_limit_exceeded_handler,
@@ -324,6 +325,10 @@ claude_cli = ClaudeCodeCLI(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Verify Claude Code authentication and CLI on startup."""
+    # Wire up direct Loki log shipping if LOKI_URL is configured. Done first so the
+    # rest of startup is captured. Handle is closed on shutdown to flush the buffer.
+    loki_handler = setup_loki_logging()
+
     logger.info("Verifying Claude Code authentication and CLI...")
 
     # Validate authentication first
@@ -402,6 +407,11 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down session manager...")
     session_manager.shutdown()
 
+    # Flush and close the Loki handler so buffered logs are shipped before exit.
+    if loki_handler is not None:
+        logging.getLogger().removeHandler(loki_handler)
+        loki_handler.close()
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -410,6 +420,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# Expose Prometheus metrics at /metrics (opt-out via METRICS_ENABLED=false)
+setup_metrics(app)
 
 # Configure CORS
 cors_origins = json.loads(os.getenv("CORS_ORIGINS", '["*"]'))
