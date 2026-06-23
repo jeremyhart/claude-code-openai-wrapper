@@ -791,7 +791,7 @@ class TestClaudeCodeCLIRunCompletion:
             async for _ in cli_instance.run_completion("Hello", continue_session=True):
                 pass
 
-            assert captured_options[0].continue_session is True
+            assert captured_options[0].continue_conversation is True
 
     @pytest.mark.asyncio
     async def test_run_completion_resume_session(self, cli_instance):
