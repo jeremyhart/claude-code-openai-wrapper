@@ -123,10 +123,15 @@ class ClaudeCodeCLI:
                 if model:
                     options.model = model
 
-                # Set system prompt - CLAUDE AGENT SDK STRUCTURED FORMAT
-                # Use structured format as per SDK documentation
+                # Set system prompt.
+                # The Claude Agent SDK accepts either a plain string (passed to
+                # the CLI as --system-prompt) or a preset dict. It does NOT
+                # understand the Anthropic content-block form
+                # {"type": "text", "text": ...}; that shape falls through the
+                # SDK's handling and the system prompt is silently dropped, so a
+                # custom prompt must be passed as a plain string.
                 if system_prompt:
-                    options.system_prompt = {"type": "text", "text": system_prompt}
+                    options.system_prompt = system_prompt
                 else:
                     # Use Claude Code preset to maintain expected behavior
                     options.system_prompt = {"type": "preset", "preset": "claude_code"}

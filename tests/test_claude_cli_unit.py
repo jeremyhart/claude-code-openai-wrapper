@@ -625,7 +625,9 @@ class TestClaudeCodeCLIRunCompletion:
 
             assert len(captured_options) == 1
             opts = captured_options[0]
-            assert opts.system_prompt == {"type": "text", "text": "You are helpful"}
+            # A custom system prompt must be passed as a plain string; the SDK
+            # silently drops the {"type": "text", ...} content-block form.
+            assert opts.system_prompt == "You are helpful"
 
     @pytest.mark.asyncio
     async def test_run_completion_with_model(self, cli_instance):

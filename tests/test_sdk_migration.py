@@ -13,13 +13,19 @@ class TestSystemPromptFormats:
     """Test that system prompt formats work correctly with new SDK."""
 
     def test_text_system_prompt_format(self):
-        """Test text-based system prompt format."""
+        """A custom system prompt is set as a plain string.
+
+        The SDK passes a string straight through to the CLI as
+        ``--system-prompt``. The Anthropic content-block form
+        ``{"type": "text", ...}`` is NOT understood by the SDK and would be
+        silently dropped, so custom prompts must be plain strings.
+        """
         options = ClaudeAgentOptions(
-            max_turns=1, system_prompt={"type": "text", "text": "You are a helpful assistant."}
+            max_turns=1, system_prompt="You are a helpful assistant."
         )
         assert options.system_prompt is not None
-        assert isinstance(options.system_prompt, dict)
-        assert options.system_prompt["type"] == "text"
+        assert isinstance(options.system_prompt, str)
+        assert options.system_prompt == "You are a helpful assistant."
 
     def test_preset_system_prompt_format(self):
         """Test preset-based system prompt format."""
