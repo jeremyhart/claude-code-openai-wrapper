@@ -1162,7 +1162,7 @@ async def anthropic_messages(
                 prompt_parts.append(f"Assistant: {msg.content}")
 
         prompt = "\n\n".join(prompt_parts)
-        system_prompt = request_body.system
+        system_prompt = request_body.get_system_prompt()
 
         # Filter content
         prompt = MessageAdapter.filter_content(prompt)
