@@ -273,10 +273,85 @@
       "panels": []
     },
     {
-      "type": "logs",
-      "title": "Wrapper logs",
+      "type": "table",
+      "title": "HTTP access log",
+      "description": "One row per /v1/* request, parsed from the JSON log line.",
       "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
-      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 40 },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 40 },
+      "id": 14,
+      "fieldConfig": {
+        "defaults": { "custom": { "filterable": true, "align": "auto" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "status" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "range", "options": { "from": 200, "to": 299, "result": { "color": "green", "index": 0 } } },
+                  { "type": "range", "options": { "from": 400, "to": 499, "result": { "color": "orange", "index": 1 } } },
+                  { "type": "range", "options": { "from": 500, "to": 599, "result": { "color": "red", "index": 2 } } }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "duration (ms)" },
+            "properties": [ { "id": "unit", "value": "ms" } ]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": false }, "sortBy": [ { "displayName": "Time", "desc": true } ] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "expr": "{job=~\"$job\"} | json | event=\"http_access\"", "queryType": "range", "maxLines": 2000 }
+      ],
+      "transformations": [
+        { "id": "extractFields", "options": { "source": "Line", "format": "json", "keepTime": true, "replace": true } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "timestamp": true, "level": true, "logger": true, "message": true, "event": true },
+            "indexByName": { "Time": 0, "method": 1, "path": 2, "status_code": 3, "duration_ms": 4, "request_id": 5 },
+            "renameByName": { "status_code": "status", "duration_ms": "duration (ms)", "request_id": "request id" }
+          }
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Claude proxy calls",
+      "description": "Successful completions forwarded to Claude (event=claude_proxy_success).",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 50 },
+      "id": 15,
+      "fieldConfig": {
+        "defaults": { "custom": { "filterable": true, "align": "auto" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "claude (ms)" }, "properties": [ { "id": "unit", "value": "ms" } ] }
+        ]
+      },
+      "options": { "showHeader": true, "cellHeight": "sm", "footer": { "show": false }, "sortBy": [ { "displayName": "Time", "desc": true } ] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "${DS_LOKI}" }, "expr": "{job=~\"$job\"} | json | event=\"claude_proxy_success\"", "queryType": "range", "maxLines": 2000 }
+      ],
+      "transformations": [
+        { "id": "extractFields", "options": { "source": "Line", "format": "json", "keepTime": true, "replace": true } },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "timestamp": true, "level": true, "logger": true, "message": true, "event": true, "session_id": true },
+            "indexByName": { "Time": 0, "model": 1, "prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 4, "claude_duration_ms": 5, "request_id": 6 },
+            "renameByName": { "claude_duration_ms": "claude (ms)", "request_id": "request id" }
+          }
+        }
+      ]
+    },
+    {
+      "type": "logs",
+      "title": "Wrapper logs (raw)",
+      "datasource": { "type": "loki", "uid": "${DS_LOKI}" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 60 },
       "id": 13,
       "options": {
         "showTime": true,

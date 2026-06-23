@@ -478,7 +478,8 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
 
 
 # Add security middleware (order matters - first added = last executed)
-app.add_middleware(RequestIDMiddleware)
+# RequestIDMiddleware is registered last (below) so it is the outermost layer and
+# assigns request.state.request_id before the logging middleware reads it.
 app.add_middleware(RequestSizeLimitMiddleware)
 
 
@@ -562,8 +563,10 @@ class DebugLoggingMiddleware(BaseHTTPMiddleware):
             raise
 
 
-# Add the debug middleware
+# Add the debug/access logging middleware, then the request-ID middleware last so
+# it wraps everything and request_id is available to the logging middleware above.
 app.add_middleware(DebugLoggingMiddleware)
+app.add_middleware(RequestIDMiddleware)
 
 
 # Custom exception handler for 422 validation errors
