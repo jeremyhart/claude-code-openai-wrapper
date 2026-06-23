@@ -241,6 +241,19 @@ class TestClaudeCodeCLIExtractMetadata:
         assert metadata["model"] is None
         assert metadata["usage"] is None
 
+    def test_extract_actual_model_from_assistant_message(self, cli_class):
+        """The model the SDK actually ran (AssistantMessage.model) overrides the request."""
+        cli = MagicMock()
+        cli.extract_metadata = cli_class.extract_metadata.__get__(cli, cli_class)
+        cli._tokens_from_usage = cli_class._tokens_from_usage
+
+        messages = [
+            {"subtype": "init", "data": {"session_id": "s1", "model": "phi4"}},
+            {"content": [{"type": "text", "text": "hi"}], "model": "claude-sonnet-4-6"},
+        ]
+        metadata = cli.extract_metadata(messages)
+        assert metadata["model"] == "claude-sonnet-4-6"
+
     def test_extract_real_token_usage_from_result(self, cli_class):
         """Real token usage from the SDK ResultMessage is parsed into metadata."""
         cli = MagicMock()

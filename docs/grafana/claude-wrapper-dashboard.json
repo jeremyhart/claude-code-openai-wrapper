@@ -1156,6 +1156,61 @@
                 "value": "ms"
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost ($)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              },
+              {
+                "id": "decimals",
+                "value": 4
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "source"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "sdk": {
+                        "color": "green",
+                        "index": 0,
+                        "text": "sdk"
+                      }
+                    }
+                  },
+                  {
+                    "type": "value",
+                    "options": {
+                      "estimate": {
+                        "color": "orange",
+                        "index": 1,
+                        "text": "estimate"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
           }
         ]
       },
@@ -1203,20 +1258,28 @@
               "logger": true,
               "message": true,
               "event": true,
-              "session_id": true
+              "session_id": true,
+              "streaming": true,
+              "endpoint": true
             },
             "indexByName": {
               "Time": 0,
               "model": 1,
-              "prompt_tokens": 2,
-              "completion_tokens": 3,
-              "total_tokens": 4,
-              "claude_duration_ms": 5,
-              "request_id": 6
+              "requested_model": 2,
+              "tokens_source": 3,
+              "prompt_tokens": 4,
+              "completion_tokens": 5,
+              "total_tokens": 6,
+              "cost_usd": 7,
+              "claude_duration_ms": 8,
+              "request_id": 9
             },
             "renameByName": {
               "claude_duration_ms": "claude (ms)",
-              "request_id": "request id"
+              "request_id": "request id",
+              "requested_model": "requested",
+              "tokens_source": "source",
+              "cost_usd": "cost ($)"
             }
           }
         }
