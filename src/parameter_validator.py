@@ -147,9 +147,24 @@ class CompatibilityReporter:
 
     @classmethod
     def generate_compatibility_report(cls, request: ChatCompletionRequest) -> Dict[str, Any]:
-        """Generate a detailed compatibility report for the request."""
+        """Generate a detailed compatibility report for the request.
+
+        Parameters fall into three buckets:
+
+        - ``supported_parameters``: handled natively (model, messages, etc.).
+        - ``best_effort_parameters``: no native SDK knob, but approximated via
+          system-prompt sampling instructions (temperature, top_p,
+          presence_penalty, frequency_penalty) or an approximate SDK mapping
+          (max_tokens -> max_thinking_tokens).
+        - ``unsupported_parameters``: genuinely ignored (logit_bias, stop).
+
+        ``best_effort_parameters`` are intentionally NOT added to
+        ``unsupported_parameters`` so callers can distinguish "approximated"
+        from "ignored".
+        """
         report = {
             "supported_parameters": [],
+            "best_effort_parameters": [],
             "unsupported_parameters": [],
             "warnings": [],
             "suggestions": [],
@@ -165,41 +180,50 @@ class CompatibilityReporter:
         if request.user:
             report["supported_parameters"].append("user (for logging)")
 
-        # Check unsupported parameters with suggestions
-        if request.temperature != 1.0:
-            report["unsupported_parameters"].append("temperature")
+        # Best-effort parameters: approximated via system-prompt instructions.
+        if request.temperature is not None and request.temperature != 1.0:
+            report["best_effort_parameters"].append("temperature")
             report["suggestions"].append(
-                "Claude Code SDK does not support temperature control. Consider using different models for varied response styles (e.g., claude-3-5-haiku for more focused responses)."
+                "temperature is approximated via system-prompt sampling instructions rather than native sampling. The effect is qualitative, not exact."
             )
 
-        if request.top_p != 1.0:
-            report["unsupported_parameters"].append("top_p")
+        if request.top_p is not None and request.top_p != 1.0:
+            report["best_effort_parameters"].append("top_p")
             report["suggestions"].append(
-                "Claude Code SDK does not support top_p. This parameter will be ignored."
+                "top_p is approximated via system-prompt sampling instructions rather than native nucleus sampling. The effect is qualitative, not exact."
             )
 
-        if request.max_tokens:
-            report["unsupported_parameters"].append("max_tokens")
+        if request.presence_penalty is not None and request.presence_penalty != 0:
+            report["best_effort_parameters"].append("presence_penalty")
             report["suggestions"].append(
-                "Use max_turns parameter instead to limit conversation length, or use max_thinking_tokens to limit internal reasoning."
+                "presence_penalty is approximated via system-prompt guidance encouraging (or tolerating) new topics. The effect is qualitative, not exact."
             )
 
-        if request.n > 1:
-            report["unsupported_parameters"].append("n")
+        if request.frequency_penalty is not None and request.frequency_penalty != 0:
+            report["best_effort_parameters"].append("frequency_penalty")
             report["suggestions"].append(
-                "Claude Code SDK only supports single responses (n=1). For multiple variations, make separate API calls."
+                "frequency_penalty is approximated via system-prompt guidance about repeating words and phrases. The effect is qualitative, not exact."
             )
 
+        if request.max_tokens or request.max_completion_tokens:
+            report["best_effort_parameters"].append("max_tokens")
+            report["suggestions"].append(
+                "max_tokens is approximately mapped to max_thinking_tokens, which bounds internal reasoning rather than visible output length."
+            )
+
+        # Multiple choices (n > 1) are supported by running the completion
+        # multiple times.
+        if request.n is not None and request.n > 1:
+            report["supported_parameters"].append("n")
+            report["suggestions"].append(
+                f"n={request.n} is supported; the completion is run {request.n} times to produce that many choices."
+            )
+
+        # Genuinely unsupported parameters.
         if request.stop:
             report["unsupported_parameters"].append("stop")
             report["suggestions"].append(
                 "Stop sequences are not supported. Consider post-processing responses or using max_turns to limit output."
-            )
-
-        if request.presence_penalty != 0 or request.frequency_penalty != 0:
-            report["unsupported_parameters"].extend(["presence_penalty", "frequency_penalty"])
-            report["suggestions"].append(
-                "Penalty parameters are not supported. Consider using different system prompts to encourage varied responses."
             )
 
         if request.logit_bias:

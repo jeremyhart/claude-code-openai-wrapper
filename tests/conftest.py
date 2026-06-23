@@ -2,6 +2,17 @@
 Pytest configuration and fixtures for claude-code-openai-wrapper tests.
 """
 
+import os
+
+# Disable the per-endpoint rate limiter for the whole test session. Several
+# TestClient-based suites (multiple responses, function calling, enhanced
+# streaming) each POST to /v1/chat/completions; with the default 10/minute chat
+# limit their combined calls would trip a 429 purely as a function of test
+# ordering. This must be set before src.main / src.rate_limiter are imported so
+# the global limiter is created as a no-op. Honor an explicit override if the
+# operator already set it.
+os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+
 import pytest
 import requests
 

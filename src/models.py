@@ -34,10 +34,26 @@ class ContentPart(BaseModel):
     text: str
 
 
+class FunctionCall(BaseModel):
+    """Function name + JSON-string arguments for a tool call (OpenAI format)."""
+
+    name: str
+    arguments: str  # JSON-encoded string of the arguments object
+
+
+class ToolCall(BaseModel):
+    """A single tool call in an assistant message (OpenAI format)."""
+
+    id: str
+    type: Literal["function"] = "function"
+    function: FunctionCall
+
+
 class Message(BaseModel):
     role: Literal["system", "user", "assistant"]
-    content: Union[str, List[ContentPart]]
+    content: Optional[Union[str, List[ContentPart]]] = None
     name: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
 
     @model_validator(mode="after")
     def normalize_content(self):
@@ -91,27 +107,59 @@ class ChatCompletionRequest(BaseModel):
     stream_options: Optional[StreamOptions] = Field(
         default=None, description="Options for streaming responses"
     )
+    # OpenAI function/tool calling. Implemented best-effort via prompt injection
+    # (see src/function_calling.py); the Claude Agent SDK has no native
+    # OpenAI-style function-calling passthrough.
+    tools: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="OpenAI tools: list of {type:'function', function:{name, description, parameters}}",
+    )
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = Field(
+        default=None,
+        description="Controls tool calling: 'auto' | 'none' | 'required' | {type:'function', function:{name}}",
+    )
+    functions: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Legacy OpenAI functions (normalized internally into tools)",
+    )
+    function_call: Optional[Union[str, Dict[str, Any]]] = Field(
+        default=None,
+        description="Legacy OpenAI function_call (normalized internally into tool_choice)",
+    )
 
     @field_validator("n")
     @classmethod
     def validate_n(cls, v):
-        if v > 1:
-            raise ValueError(
-                "Claude Code SDK does not support multiple choices (n > 1). Only single response generation is supported."
-            )
+        # Multiple choices (n > 1) are supported by running the completion
+        # multiple times. Cap matches OpenAI's documented upper bound of 128.
+        if v < 1:
+            raise ValueError("n must be at least 1.")
+        if v > 128:
+            raise ValueError("n must be at most 128.")
         return v
 
     def log_parameter_info(self):
-        """Log information about parameter handling."""
+        """Log information about how each OpenAI parameter is handled.
+
+        The Claude Agent SDK does not expose native temperature/top_p/penalty
+        knobs through this wrapper, so the handling strategy is:
+
+        - temperature, top_p, presence_penalty, frequency_penalty:
+          best-effort via system-prompt sampling instructions (see
+          ``get_sampling_instructions``).
+        - max_tokens / max_completion_tokens: approximately mapped to the SDK's
+          ``max_thinking_tokens`` (limits internal reasoning, not output).
+        - logit_bias, stop: genuinely unsupported and logged as such.
+        """
         info_messages = []
         warnings = []
 
-        if self.temperature != 1.0:
+        if self.temperature is not None and self.temperature != 1.0:
             info_messages.append(
                 f"temperature={self.temperature} will be applied via system prompt (best-effort)"
             )
 
-        if self.top_p != 1.0:
+        if self.top_p is not None and self.top_p != 1.0:
             info_messages.append(
                 f"top_p={self.top_p} will be applied via system prompt (best-effort)"
             )
@@ -119,17 +167,18 @@ class ChatCompletionRequest(BaseModel):
         if self.max_tokens is not None or self.max_completion_tokens is not None:
             max_val = self.max_completion_tokens or self.max_tokens
             info_messages.append(
-                f"max_tokens={max_val} will be mapped to max_thinking_tokens (best-effort)"
+                f"max_tokens={max_val} will be mapped to max_thinking_tokens "
+                "(approximate; limits internal reasoning, not output length)"
             )
 
-        if self.presence_penalty != 0:
-            warnings.append(
-                f"presence_penalty={self.presence_penalty} is not supported and will be ignored"
+        if self.presence_penalty is not None and self.presence_penalty != 0:
+            info_messages.append(
+                f"presence_penalty={self.presence_penalty} will be applied via system prompt (best-effort)"
             )
 
-        if self.frequency_penalty != 0:
-            warnings.append(
-                f"frequency_penalty={self.frequency_penalty} is not supported and will be ignored"
+        if self.frequency_penalty is not None and self.frequency_penalty != 0:
+            info_messages.append(
+                f"frequency_penalty={self.frequency_penalty} will be applied via system prompt (best-effort)"
             )
 
         if self.logit_bias:
@@ -145,10 +194,16 @@ class ChatCompletionRequest(BaseModel):
             logger.warning(f"OpenAI API compatibility: {warning}")
 
     def get_sampling_instructions(self) -> Optional[str]:
-        """
-        Generate sampling instructions based on temperature and top_p.
+        """Build best-effort system-prompt guidance for sampling parameters.
 
-        Returns system prompt text to approximate the requested sampling behavior.
+        Translates ``temperature``, ``top_p``, ``presence_penalty`` and
+        ``frequency_penalty`` into natural-language instructions, since the
+        Claude Agent SDK does not expose these as native knobs. The returned
+        string (if any) is appended to the system prompt by the caller.
+
+        NOTE: the return contract is unchanged - this still returns a single
+        ``Optional[str]`` (``None`` when no non-default sampling params are
+        set), so callers that compose system prompts do not need to change.
         """
         instructions = []
 
@@ -180,10 +235,49 @@ class ChatCompletionRequest(BaseModel):
                     "Prefer well-established and common approaches over unusual ones."
                 )
 
+        # presence_penalty discourages reusing tokens that have already
+        # appeared (encourages introducing new topics). Positive values push
+        # toward novelty; negative values tolerate repetition.
+        if self.presence_penalty is not None and self.presence_penalty > 0:
+            instructions.append(
+                "Introduce new ideas and topics rather than dwelling on points you have already made."
+            )
+        elif self.presence_penalty is not None and self.presence_penalty < 0:
+            instructions.append(
+                "It is acceptable to stay on topic and revisit previously mentioned ideas where helpful."
+            )
+
+        # frequency_penalty discourages repeating the same words/phrases.
+        # Positive values push toward varied wording; negative values tolerate
+        # verbatim repetition.
+        if self.frequency_penalty is not None and self.frequency_penalty > 0:
+            instructions.append(
+                "Avoid repeating the same words and phrases; vary your wording throughout the response."
+            )
+        elif self.frequency_penalty is not None and self.frequency_penalty < 0:
+            instructions.append(
+                "Repeating words and phrases for emphasis or consistency is acceptable."
+            )
+
         return " ".join(instructions) if instructions else None
 
     def to_claude_options(self) -> Dict[str, Any]:
-        """Convert OpenAI request parameters to Claude Code SDK options."""
+        """Convert OpenAI request parameters to Claude Code SDK options.
+
+        Only parameters with a real ``ClaudeAgentOptions`` counterpart are
+        emitted here:
+
+        - ``model`` maps directly.
+        - ``max_tokens`` / ``max_completion_tokens`` are approximately mapped to
+          ``max_thinking_tokens`` (this bounds internal reasoning rather than
+          the visible output, so it is best-effort only).
+
+        ``temperature``, ``top_p``, ``presence_penalty`` and
+        ``frequency_penalty`` are NOT placed in the options dict - they are
+        handled via ``get_sampling_instructions`` (system-prompt guidance).
+        ``logit_bias`` and ``stop`` have no SDK equivalent and are ignored
+        (logged by ``log_parameter_info``).
+        """
         # Log parameter handling information
         self.log_parameter_info()
 
@@ -193,11 +287,12 @@ class ChatCompletionRequest(BaseModel):
         if self.model:
             options["model"] = self.model
 
-        # Map max_tokens to max_thinking_tokens (best effort)
+        # Map max_tokens to max_thinking_tokens (best effort).
+        # The Claude SDK has no exact output-token limit; max_thinking_tokens
+        # bounds internal reasoning, so this is approximate and may not behave
+        # like OpenAI's max_tokens.
         max_token_value = self.max_completion_tokens or self.max_tokens
         if max_token_value is not None:
-            # Claude SDK doesn't have exact token limiting, but we can try max_thinking_tokens
-            # This is approximate and may not work as expected
             options["max_thinking_tokens"] = max_token_value
             logger.info(
                 f"Mapped max_tokens={max_token_value} to max_thinking_tokens (approximate behavior)"
@@ -214,7 +309,9 @@ class ChatCompletionRequest(BaseModel):
 class Choice(BaseModel):
     index: int
     message: Message
-    finish_reason: Optional[Literal["stop", "length", "content_filter", "null"]] = None
+    finish_reason: Optional[
+        Literal["stop", "length", "content_filter", "tool_calls", "null"]
+    ] = None
 
 
 class Usage(BaseModel):
@@ -236,7 +333,9 @@ class ChatCompletionResponse(BaseModel):
 class StreamChoice(BaseModel):
     index: int
     delta: Dict[str, Any]
-    finish_reason: Optional[Literal["stop", "length", "content_filter", "null"]] = None
+    finish_reason: Optional[
+        Literal["stop", "length", "content_filter", "tool_calls", "null"]
+    ] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):
