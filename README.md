@@ -702,14 +702,17 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 
 ### 🚫 **Current Limitations**
 - **Images in messages** are converted to text placeholders
-- **Function calling** is supported on a **best-effort, prompt-based** basis: OpenAI `tools`/`tool_choice` (and legacy `functions`/`function_call`) schemas are injected into the system prompt instructing Claude to emit a structured JSON envelope, which is parsed back into OpenAI `tool_calls` responses (`finish_reason: "tool_calls"`). Because the Claude Agent SDK has no native OpenAI-style function-calling passthrough, this relies on the model following the prompt and is not guaranteed to be perfect.
-- **OpenAI parameters** not yet mapped: `temperature`, `top_p`, `max_tokens`, `logit_bias`, `presence_penalty`, `frequency_penalty`
-- **Multiple responses** (`n > 1`) not supported
+- **Best-effort parameter mapping**: `temperature`, `top_p`, `presence_penalty`, and `frequency_penalty` are approximated via system-prompt steering (the Claude Agent SDK exposes no native sampling knobs), and `max_tokens`/`max_completion_tokens` map to `max_thinking_tokens` (bounds internal reasoning, not output length). `logit_bias` and `stop` have no SDK equivalent and are ignored (logged).
+- **Function calling** is **prompt-based**: because the SDK has no native OpenAI-style function-calling passthrough, tool schemas are injected into the system prompt and the structured response is parsed back out — it relies on the model following the prompt and is not guaranteed to be perfect.
 
-### 🛣 **Planned Enhancements** 
-- [ ] **Tool configuration** - allowed/disallowed tools endpoints  
-- [ ] **OpenAI parameter mapping** - temperature, top_p, max_tokens support
-- [ ] **Enhanced streaming** - better chunk handling
+### ✅ **Recent Improvements**
+- **Function calling**: OpenAI `tools`/`tool_choice` (and legacy `functions`/`function_call`) are supported on a best-effort, prompt-based basis. Schemas are injected into the system prompt instructing Claude to emit a structured JSON envelope, which is parsed back into OpenAI `tool_calls` responses (`finish_reason: "tool_calls"`), for both streaming and non-streaming.
+- **OpenAI parameter mapping**: `temperature`, `top_p`, `max_tokens`, `presence_penalty`, and `frequency_penalty` are now mapped (best-effort) instead of silently ignored; `CompatibilityReporter` distinguishes `best_effort_parameters` from truly unsupported ones.
+- **Multiple responses (`n > 1`)**: requests may request up to 128 choices; each choice is generated and returned with the correct `index` (streaming and non-streaming), with usage aggregated across choices.
+- **Enhanced streaming**: improved chunk handling — no duplicated/empty deltas, streaming-safe content filtering (`filter_content_streaming`), clean mid-stream error finalization, and optional large-block smoothing via `STREAM_MAX_DELTA_CHARS`.
+
+### 🛣 **Planned Enhancements**
+- [ ] **Tool configuration** - allowed/disallowed tools endpoints
 - [ ] **MCP integration** - Model Context Protocol server support
 
 ### ✅ **Recent Improvements (v2.2.0)**
