@@ -181,5 +181,118 @@ def test_plain_text_response_when_no_tool_call(patched):
     assert body["content"][0]["text"] == "It is sunny in Wellington."
 
 
+def _parse_sse(text):
+    """Parse an Anthropic SSE body into a list of (event, data) tuples."""
+    import json
+
+    events = []
+    for block in text.strip().split("\n\n"):
+        event = None
+        data = None
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data = json.loads(line[len("data:"):].strip())
+        if event is not None:
+            events.append((event, data))
+    return events
+
+
+def test_streaming_text_response(patched):
+    """A streaming text request emits the native Anthropic event sequence."""
+    captured, state = patched
+    state["raw"] = "Hello there."
+    client = TestClient(app)
+
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 20,
+            "system": "You are Zephyr-7.",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse(resp.text)
+    names = [e for e, _ in events]
+
+    assert names[0] == "message_start"
+    assert "content_block_start" in names
+    assert "content_block_stop" in names
+    assert names[-1] == "message_stop"
+
+    # Text delta carries the streamed content.
+    deltas = [d for e, d in events if e == "content_block_delta"]
+    streamed = "".join(
+        d["delta"]["text"] for d in deltas if d["delta"]["type"] == "text_delta"
+    )
+    assert "Hello there." in streamed
+
+    # message_delta reports a normal end_turn stop reason.
+    msg_delta = next(d for e, d in events if e == "message_delta")
+    assert msg_delta["delta"]["stop_reason"] == "end_turn"
+
+    # Streaming still bypasses the preset / built-in tools.
+    assert captured["kwargs"]["use_claude_code_preset"] is False
+    assert captured["kwargs"]["stream"] is True
+    assert captured["kwargs"]["disallowed_tools"] == CLAUDE_TOOLS
+
+
+def test_streaming_tool_use_response(patched):
+    """A streaming tool call emits a tool_use block and stop_reason=tool_use."""
+    captured, state = patched
+    state["raw"] = (
+        '```json\n{"tool_calls": [{"name": "get_weather", '
+        '"arguments": {"city": "Wellington"}}]}\n```'
+    )
+    client = TestClient(app)
+
+    resp = client.post(
+        "/v1/messages",
+        json={
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 150,
+            "stream": True,
+            "messages": [{"role": "user", "content": "weather in Wellington? use the tool"}],
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                }
+            ],
+        },
+    )
+
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+
+    # A tool_use content block is started.
+    starts = [d for e, d in events if e == "content_block_start"]
+    assert any(s["content_block"]["type"] == "tool_use" for s in starts)
+    tool_start = next(s for s in starts if s["content_block"]["type"] == "tool_use")
+    assert tool_start["content_block"]["name"] == "get_weather"
+
+    # The arguments arrive as an input_json_delta.
+    deltas = [d for e, d in events if e == "content_block_delta"]
+    json_deltas = [d for d in deltas if d["delta"]["type"] == "input_json_delta"]
+    assert json_deltas
+    import json as _json
+
+    assert _json.loads(json_deltas[0]["delta"]["partial_json"]) == {"city": "Wellington"}
+
+    msg_delta = next(d for e, d in events if e == "message_delta")
+    assert msg_delta["delta"]["stop_reason"] == "tool_use"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
