@@ -702,7 +702,7 @@ See `examples/session_continuity.py` for comprehensive Python examples and `exam
 
 ### 🚫 **Current Limitations**
 - **Images in messages** are converted to text placeholders
-- **Function calling** not supported (tools work automatically based on prompts)
+- **Function calling** is supported on a **best-effort, prompt-based** basis: OpenAI `tools`/`tool_choice` (and legacy `functions`/`function_call`) schemas are injected into the system prompt instructing Claude to emit a structured JSON envelope, which is parsed back into OpenAI `tool_calls` responses (`finish_reason: "tool_calls"`). Because the Claude Agent SDK has no native OpenAI-style function-calling passthrough, this relies on the model following the prompt and is not guaranteed to be perfect.
 - **OpenAI parameters** not yet mapped: `temperature`, `top_p`, `max_tokens`, `logit_bias`, `presence_penalty`, `frequency_penalty`
 - **Multiple responses** (`n > 1`) not supported
 

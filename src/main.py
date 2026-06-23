@@ -6,7 +6,7 @@ import secrets
 import string
 import time
 import uuid
-from typing import Optional, AsyncGenerator, Dict, Any, List
+from typing import Optional, AsyncGenerator, Dict, Any, List, Iterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, Depends
@@ -24,6 +24,7 @@ from src.models import (
     ChatCompletionStreamResponse,
     Choice,
     Message,
+    ToolCall,
     Usage,
     StreamChoice,
     SessionListResponse,
@@ -43,6 +44,7 @@ from src.models import (
 )
 from src.claude_cli import ClaudeCodeCLI
 from src.message_adapter import MessageAdapter
+from src.function_calling import build_tool_prompt, parse_tool_calls, resolve_tools
 from src.auth import (
     verify_api_key,
     security,
@@ -699,6 +701,79 @@ def _log_claude_proxy_success(
     return prompt_tokens, completion_tokens, cost_usd
 
 
+async def _run_single_completion(
+    *,
+    request_id: str,
+    proxy_model: str,
+    prompt: str,
+    system_prompt: Optional[str],
+    claude_options: Dict[str, Any],
+    session_id: Optional[str],
+    tool_prompt: Optional[str] = None,
+):
+    """Run one non-streaming completion.
+
+    Returns ``(assistant_content, parsed_tool_calls, prompt_tokens,
+    completion_tokens)``. ``parsed_tool_calls`` is ``None`` unless ``tool_prompt``
+    was supplied AND the raw response parsed into a prompt-based tool call.
+
+    This isolates the per-choice work so the n>1 path can call it repeatedly.
+    It does NOT persist anything to the session; the caller decides which choice
+    (the first one only) gets appended to the session history.
+    """
+    claude_start = asyncio.get_event_loop().time()
+    chunks = []
+    async for chunk in claude_cli.run_completion(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        model=claude_options.get("model"),
+        max_turns=claude_options.get("max_turns", 10),
+        allowed_tools=claude_options.get("allowed_tools"),
+        disallowed_tools=claude_options.get("disallowed_tools"),
+        permission_mode=claude_options.get("permission_mode"),
+        stream=False,
+    ):
+        chunks.append(chunk)
+
+    # Extract assistant message
+    raw_assistant_content = claude_cli.parse_claude_message(chunks)
+
+    if not raw_assistant_content:
+        raise HTTPException(status_code=500, detail="No response from Claude Code")
+
+    # If tools were requested, check the RAW content (before filtering, which
+    # would strip the JSON envelope) for a prompt-based tool call.
+    parsed_tool_calls = None
+    if tool_prompt:
+        parsed_tool_calls = parse_tool_calls(raw_assistant_content)
+
+    # Filter out tool usage and thinking blocks
+    assistant_content = MessageAdapter.filter_content(raw_assistant_content)
+
+    # Log the structured success event with real SDK usage/cost (falling
+    # back to estimate) and reuse the resolved token counts for the response.
+    claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
+    metadata = claude_cli.extract_metadata(chunks)
+    prompt_tokens, completion_tokens, _cost = _log_claude_proxy_success(
+        request_id=request_id,
+        requested_model=proxy_model,
+        metadata=metadata,
+        prompt=prompt,
+        completion_text=assistant_content,
+        session_id=session_id,
+        duration_ms=claude_duration_ms,
+        endpoint="/v1/chat/completions",
+        streaming=False,
+    )
+    return assistant_content, parsed_tool_calls, prompt_tokens, completion_tokens
+
+
+# Maximum characters per streamed content delta. A single SDK text block can be
+# large; splitting it into bounded segments lets clients render incrementally.
+# 0 disables segmentation (emit each filtered block as one delta).
+STREAM_MAX_DELTA_CHARS = int(os.getenv("STREAM_MAX_DELTA_CHARS", "0"))
+
+
 async def generate_streaming_response(
     request: ChatCompletionRequest, request_id: str, claude_headers: Optional[Dict[str, Any]] = None
 ) -> AsyncGenerator[str, None]:
@@ -720,6 +795,22 @@ async def generate_streaming_response(
             else:
                 system_prompt = sampling_instructions
             logger.debug(f"Added sampling instructions: {sampling_instructions}")
+
+        # Append the prompt-based function-calling fragment if tools/functions
+        # were supplied. Composed AFTER sampling instructions (just appended).
+        effective_tools, effective_tool_choice = resolve_tools(
+            request.tools,
+            request.tool_choice,
+            request.functions,
+            request.function_call,
+        )
+        tool_prompt = build_tool_prompt(effective_tools, effective_tool_choice)
+        if tool_prompt:
+            if system_prompt:
+                system_prompt = f"{system_prompt}\n\n{tool_prompt}"
+            else:
+                system_prompt = tool_prompt
+            logger.info("Added prompt-based function-calling instructions (streaming)")
 
         # Filter content for unsupported features
         prompt = MessageAdapter.filter_content(prompt)
@@ -760,180 +851,326 @@ async def generate_streaming_response(
             "/v1/chat/completions",
             streaming=True,
         )
-        claude_start = asyncio.get_event_loop().time()
-        chunks_buffer = []
-        role_sent = False  # Track if we've sent the initial role chunk
-        content_sent = False  # Track if we've sent any content
 
-        async for chunk in claude_cli.run_completion(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            model=claude_options.get("model"),
-            max_turns=claude_options.get("max_turns", 10),
-            allowed_tools=claude_options.get("allowed_tools"),
-            disallowed_tools=claude_options.get("disallowed_tools"),
-            permission_mode=claude_options.get("permission_mode"),
-            stream=True,
-        ):
-            chunks_buffer.append(chunk)
+        # n>1: stream the n choices sequentially. Each choice carries its own
+        # choice.index across role/content/finish chunks (OpenAI-shaped). For
+        # n==1 (and no tools) this produces output byte-for-byte identical to the
+        # prior single stream. The aggregated usage/[DONE] handling lives after
+        # the loop so a single trailing usage chunk is emitted for the response.
+        n_choices = request.n or 1
+        # For n==1 we keep the historical behavior of attaching usage directly to
+        # the single finish chunk. For n>1 each choice emits its own finish chunk
+        # (no usage) and a single aggregated usage chunk is emitted at the end.
+        attach_usage_to_finish = n_choices == 1
 
-            # Check if we have an assistant message
-            # Handle both old format (type/message structure) and new format (direct content)
-            content = None
-            if chunk.get("type") == "assistant" and "message" in chunk:
-                # Old format: {"type": "assistant", "message": {"content": [...]}}
-                message = chunk["message"]
-                if isinstance(message, dict) and "content" in message:
-                    content = message["content"]
-            elif "content" in chunk and isinstance(chunk["content"], list):
-                # New format: {"content": [TextBlock(...)]}  (converted AssistantMessage)
-                content = chunk["content"]
-
-            if content is not None:
-                # Send initial role chunk if we haven't already
-                if not role_sent:
-                    initial_chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        model=request.model,
-                        choices=[
-                            StreamChoice(
-                                index=0,
-                                delta={"role": "assistant", "content": ""},
-                                finish_reason=None,
-                            )
-                        ],
-                    )
-                    yield f"data: {initial_chunk.model_dump_json()}\n\n"
-                    role_sent = True
-
-                # Handle content blocks
-                if isinstance(content, list):
-                    for block in content:
-                        # Handle TextBlock objects from Claude Agent SDK
-                        if hasattr(block, "text"):
-                            raw_text = block.text
-                        # Handle dictionary format for backward compatibility
-                        elif isinstance(block, dict) and block.get("type") == "text":
-                            raw_text = block.get("text", "")
-                        else:
-                            continue
-
-                        # Filter out tool usage and thinking blocks
-                        filtered_text = MessageAdapter.filter_content(raw_text)
-
-                        if filtered_text and not filtered_text.isspace():
-                            # Create streaming chunk
-                            stream_chunk = ChatCompletionStreamResponse(
-                                id=request_id,
-                                model=request.model,
-                                choices=[
-                                    StreamChoice(
-                                        index=0,
-                                        delta={"content": filtered_text},
-                                        finish_reason=None,
-                                    )
-                                ],
-                            )
-
-                            yield f"data: {stream_chunk.model_dump_json()}\n\n"
-                            content_sent = True
-
-                elif isinstance(content, str):
-                    # Filter out tool usage and thinking blocks
-                    filtered_content = MessageAdapter.filter_content(content)
-
-                    if filtered_content and not filtered_content.isspace():
-                        # Create streaming chunk
-                        stream_chunk = ChatCompletionStreamResponse(
-                            id=request_id,
-                            model=request.model,
-                            choices=[
-                                StreamChoice(
-                                    index=0, delta={"content": filtered_content}, finish_reason=None
-                                )
-                            ],
-                        )
-
-                        yield f"data: {stream_chunk.model_dump_json()}\n\n"
-                        content_sent = True
-
-        # Handle case where no role was sent (send at least role chunk)
-        if not role_sent:
-            # Send role chunk with empty content if we never got any assistant messages
+        def _build_role_chunk(index: int) -> str:
+            """SSE line for the initial role delta (sent exactly once per choice)."""
             initial_chunk = ChatCompletionStreamResponse(
                 id=request_id,
                 model=request.model,
                 choices=[
                     StreamChoice(
-                        index=0, delta={"role": "assistant", "content": ""}, finish_reason=None
-                    )
-                ],
-            )
-            yield f"data: {initial_chunk.model_dump_json()}\n\n"
-            role_sent = True
-
-        # If we sent role but no content, send a minimal response
-        if role_sent and not content_sent:
-            fallback_chunk = ChatCompletionStreamResponse(
-                id=request_id,
-                model=request.model,
-                choices=[
-                    StreamChoice(
-                        index=0,
-                        delta={"content": "I'm unable to provide a response at the moment."},
+                        index=index,
+                        delta={"role": "assistant", "content": ""},
                         finish_reason=None,
                     )
                 ],
             )
-            yield f"data: {fallback_chunk.model_dump_json()}\n\n"
+            return f"data: {initial_chunk.model_dump_json()}\n\n"
 
-        # Extract assistant response from all chunks
-        assistant_content = None
-        if chunks_buffer:
-            assistant_content = claude_cli.parse_claude_message(chunks_buffer)
+        def _build_content_chunk(index: int, text: str) -> str:
+            """SSE line for a single non-empty content delta."""
+            stream_chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                model=request.model,
+                choices=[StreamChoice(index=index, delta={"content": text}, finish_reason=None)],
+            )
+            return f"data: {stream_chunk.model_dump_json()}\n\n"
 
-            # Store in session if applicable
-            if actual_session_id and assistant_content:
-                assistant_message = Message(role="assistant", content=assistant_content)
-                session_manager.add_assistant_response(actual_session_id, assistant_message)
+        def _iter_block_text(content: Any) -> Iterator[str]:
+            """Yield raw text from an AssistantMessage content payload.
 
-        # Emit the structured success event so streaming requests appear on the
-        # dashboard with real token/cost/model data, just like non-streaming ones.
-        claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
-        stream_metadata = claude_cli.extract_metadata(chunks_buffer)
-        _log_claude_proxy_success(
-            request_id=request_id,
-            requested_model=proxy_model,
-            metadata=stream_metadata,
-            prompt=prompt,
-            completion_text=assistant_content or "",
-            session_id=actual_session_id,
-            duration_ms=claude_duration_ms,
-            endpoint="/v1/chat/completions",
-            streaming=True,
-        )
+            Accepts the SDK's list-of-blocks form (TextBlock objects or dicts)
+            as well as a bare string. Non-text blocks (tool use, etc.) are
+            skipped so they never reach the wire.
+            """
+            blocks = content if isinstance(content, list) else [content]
+            for block in blocks:
+                if hasattr(block, "text"):
+                    yield block.text
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    yield block.get("text", "")
+                elif isinstance(block, str):
+                    yield block
 
-        # Prepare usage data if requested
-        usage_data = None
-        if request.stream_options and request.stream_options.include_usage:
-            # Estimate token usage based on prompt and completion
-            completion_text = assistant_content or ""
-            token_usage = claude_cli.estimate_token_usage(prompt, completion_text, request.model)
+        collected_completions: List[str] = []
+
+        async def _stream_one_choice(index: int):
+            """Stream a single choice, folding in enhanced-streaming + tools."""
+            claude_start = asyncio.get_event_loop().time()
+            chunks_buffer = []
+            role_sent = False  # Track if we've sent the initial role chunk
+            content_sent = False  # Track if we've sent any content
+            stream_error_message = None  # Set if the SDK yields an error result
+
+            async for chunk in claude_cli.run_completion(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=claude_options.get("model"),
+                max_turns=claude_options.get("max_turns", 10),
+                allowed_tools=claude_options.get("allowed_tools"),
+                disallowed_tools=claude_options.get("disallowed_tools"),
+                permission_mode=claude_options.get("permission_mode"),
+                stream=True,
+            ):
+                chunks_buffer.append(chunk)
+
+                # Detect an error result yielded by the SDK so we can terminate
+                # the stream cleanly rather than letting it surface as a throw.
+                if chunk.get("is_error") or chunk.get("subtype") in (
+                    "error_during_execution",
+                    "error_max_turns",
+                ):
+                    stream_error_message = chunk.get("error_message") or "Claude Code error"
+                    logger.error(f"SDK error during streaming: {stream_error_message}")
+                    break
+
+                # Only AssistantMessage chunks carry incremental text to stream.
+                # The terminating ResultMessage (subtype == "success" / has
+                # total_cost_usd) repeats the same text in its ``result`` field;
+                # streaming it too would duplicate the whole response, so we
+                # ignore it here and use it only for session storage / metadata.
+                is_result_message = (
+                    chunk.get("subtype") == "success"
+                    or "total_cost_usd" in chunk
+                    or chunk.get("type") == "result"
+                )
+                content = None
+                if not is_result_message:
+                    if chunk.get("type") == "assistant" and "message" in chunk:
+                        # Old format: {"type": "assistant", "message": {...}}
+                        message = chunk["message"]
+                        if isinstance(message, dict) and "content" in message:
+                            content = message["content"]
+                    elif "content" in chunk and isinstance(chunk["content"], list):
+                        # New format: {"content": [TextBlock(...)]} (AssistantMessage)
+                        content = chunk["content"]
+
+                if content is None:
+                    continue
+
+                # When tools are requested we cannot know whether the response is
+                # a tool call until the full text is available, so suppress
+                # incremental content streaming and decide after the loop. Without
+                # tools, behavior is byte-for-byte identical to before.
+                if tool_prompt:
+                    continue
+
+                # Send initial role chunk before any content.
+                if not role_sent:
+                    yield _build_role_chunk(index)
+                    role_sent = True
+
+                for raw_text in _iter_block_text(content):
+                    # Filter per complete block (streaming-safe variant): scrub
+                    # tool/thinking/image markup while preserving inter-token
+                    # whitespace and never injecting placeholder fallback text.
+                    filtered_text = MessageAdapter.filter_content_streaming(raw_text)
+                    if not filtered_text or filtered_text.isspace():
+                        # Skip empty / whitespace-only deltas; emitting them can
+                        # confuse strict OpenAI clients.
+                        continue
+                    # Optionally smooth a very large block into multiple deltas.
+                    for segment in MessageAdapter.segment_text(
+                        filtered_text, STREAM_MAX_DELTA_CHARS
+                    ):
+                        if not segment:
+                            continue
+                        yield _build_content_chunk(index, segment)
+                        content_sent = True
+
+            # Extract assistant response from all chunks (used for tools, session,
+            # metadata, and usage accounting regardless of the streaming path).
+            assistant_content = None
+            if chunks_buffer:
+                assistant_content = claude_cli.parse_claude_message(chunks_buffer)
+
+                # Store in session only for the FIRST choice so we don't append
+                # multiple assistant turns for a single user request.
+                if index == 0 and actual_session_id and assistant_content:
+                    assistant_message = Message(role="assistant", content=assistant_content)
+                    session_manager.add_assistant_response(actual_session_id, assistant_message)
+
+            # Decide the per-choice finish reason. Default "stop"; switches to
+            # "tool_calls" when tools were requested and a tool call was parsed.
+            choice_finish_reason = "stop"
+
+            if tool_prompt:
+                # Decide whether the buffered response is a prompt-based tool
+                # call. Parsing uses the RAW content (filter_content would strip
+                # the JSON envelope).
+                streamed_tool_calls = parse_tool_calls(assistant_content)
+                if streamed_tool_calls:
+                    choice_finish_reason = "tool_calls"
+                    # Role chunk first, then a single delta carrying the whole
+                    # tool_calls array (OpenAI-parseable).
+                    role_chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        model=request.model,
+                        choices=[
+                            StreamChoice(
+                                index=index,
+                                delta={"role": "assistant", "content": None},
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                    yield f"data: {role_chunk.model_dump_json()}\n\n"
+
+                    delta_tool_calls = [
+                        {
+                            "index": idx,
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {
+                                "name": tc["function"]["name"],
+                                "arguments": tc["function"]["arguments"],
+                            },
+                        }
+                        for idx, tc in enumerate(streamed_tool_calls)
+                    ]
+                    tool_chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        model=request.model,
+                        choices=[
+                            StreamChoice(
+                                index=index,
+                                delta={"tool_calls": delta_tool_calls},
+                                finish_reason=None,
+                            )
+                        ],
+                    )
+                    yield f"data: {tool_chunk.model_dump_json()}\n\n"
+                else:
+                    # No tool call detected: stream the buffered text as a normal
+                    # response now (incremental emission was suppressed above).
+                    yield _build_role_chunk(index)
+                    role_sent = True
+                    filtered = MessageAdapter.filter_content(assistant_content or "")
+                    if filtered and not filtered.isspace():
+                        yield _build_content_chunk(index, filtered)
+                        content_sent = True
+                    elif not content_sent:
+                        # Keep the legacy non-empty guarantee for empty replies.
+                        yield _build_content_chunk(
+                            index, "I'm unable to provide a response at the moment."
+                        )
+                        content_sent = True
+            else:
+                # Always open the stream with a role delta, even if nothing
+                # followed (no content, or an early error), so clients see a
+                # well-formed stream.
+                if not role_sent:
+                    yield _build_role_chunk(index)
+                    role_sent = True
+
+                # If we sent the role but no content, send a single fallback
+                # delta. For a mid-stream SDK error this surfaces the error text;
+                # for an empty response it keeps the legacy placeholder behaviour.
+                if role_sent and not content_sent:
+                    fallback_text = (
+                        f"An error occurred while generating the response: {stream_error_message}"
+                        if stream_error_message
+                        else "I'm unable to provide a response at the moment."
+                    )
+                    yield _build_content_chunk(index, fallback_text)
+
+            # Emit the structured success event so streaming requests appear on
+            # the dashboard with real token/cost/model data (first choice only
+            # logging is not required; the n>1 branch logs each run).
+            claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
+            stream_metadata = claude_cli.extract_metadata(chunks_buffer)
+            _log_claude_proxy_success(
+                request_id=request_id,
+                requested_model=proxy_model,
+                metadata=stream_metadata,
+                prompt=prompt,
+                completion_text=assistant_content or "",
+                session_id=actual_session_id,
+                duration_ms=claude_duration_ms,
+                endpoint="/v1/chat/completions",
+                streaming=True,
+            )
+
+            # Stash the completion text for aggregated usage accounting.
+            collected_completions.append(assistant_content or "")
+
+            # Finish chunk. For n==1 (attach_usage_to_finish) usage rides on this
+            # chunk exactly like before. For n>1 it's a bare per-choice finish.
+            finish_usage = None
+            if (
+                attach_usage_to_finish
+                and request.stream_options
+                and request.stream_options.include_usage
+            ):
+                token_usage = claude_cli.estimate_token_usage(
+                    prompt, assistant_content or "", request.model
+                )
+                finish_usage = Usage(
+                    prompt_tokens=token_usage["prompt_tokens"],
+                    completion_tokens=token_usage["completion_tokens"],
+                    total_tokens=token_usage["total_tokens"],
+                )
+                logger.debug(f"Estimated usage: {finish_usage}")
+
+            finish_chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                model=request.model,
+                choices=[
+                    StreamChoice(index=index, delta={}, finish_reason=choice_finish_reason)
+                ],
+                usage=finish_usage,
+            )
+            yield f"data: {finish_chunk.model_dump_json()}\n\n"
+
+        for index in range(n_choices):
+            async for sse in _stream_one_choice(index):
+                yield sse
+
+        # For n>1, emit a single aggregated usage chunk after all choices when
+        # usage was requested (OpenAI emits a trailing usage-only chunk).
+        if (
+            not attach_usage_to_finish
+            and request.stream_options
+            and request.stream_options.include_usage
+        ):
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
+            total_tokens = 0
+            for completion_text in collected_completions:
+                token_usage = claude_cli.estimate_token_usage(
+                    prompt, completion_text, request.model
+                )
+                total_prompt_tokens += token_usage["prompt_tokens"]
+                total_completion_tokens += token_usage["completion_tokens"]
+                total_tokens += token_usage["total_tokens"]
             usage_data = Usage(
-                prompt_tokens=token_usage["prompt_tokens"],
-                completion_tokens=token_usage["completion_tokens"],
-                total_tokens=token_usage["total_tokens"],
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                total_tokens=total_tokens,
             )
             logger.debug(f"Estimated usage: {usage_data}")
 
-        # Send final chunk with finish reason and optionally usage data
-        final_chunk = ChatCompletionStreamResponse(
-            id=request_id,
-            model=request.model,
-            choices=[StreamChoice(index=0, delta={}, finish_reason="stop")],
-            usage=usage_data,
-        )
-        yield f"data: {final_chunk.model_dump_json()}\n\n"
+            # Final usage-only chunk (empty choices), matching OpenAI's behavior
+            # when stream_options.include_usage is set.
+            usage_chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                model=request.model,
+                choices=[],
+                usage=usage_data,
+            )
+            yield f"data: {usage_chunk.model_dump_json()}\n\n"
+
         yield "data: [DONE]\n\n"
 
     except Exception as e:
@@ -1009,6 +1246,22 @@ async def chat_completions(
                     system_prompt = sampling_instructions
                 logger.debug(f"Added sampling instructions: {sampling_instructions}")
 
+            # Append the prompt-based function-calling fragment if tools/functions
+            # were supplied. Composed AFTER sampling instructions (just appended).
+            effective_tools, effective_tool_choice = resolve_tools(
+                request_body.tools,
+                request_body.tool_choice,
+                request_body.functions,
+                request_body.function_call,
+            )
+            tool_prompt = build_tool_prompt(effective_tools, effective_tool_choice)
+            if tool_prompt:
+                if system_prompt:
+                    system_prompt = f"{system_prompt}\n\n{tool_prompt}"
+                else:
+                    system_prompt = tool_prompt
+                logger.info("Added prompt-based function-calling instructions")
+
             # Filter content
             prompt = MessageAdapter.filter_content(prompt)
             if system_prompt:
@@ -1048,65 +1301,74 @@ async def chat_completions(
                 "/v1/chat/completions",
                 streaming=False,
             )
-            claude_start = asyncio.get_event_loop().time()
-            chunks = []
-            async for chunk in claude_cli.run_completion(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                model=claude_options.get("model"),
-                max_turns=claude_options.get("max_turns", 10),
-                allowed_tools=claude_options.get("allowed_tools"),
-                disallowed_tools=claude_options.get("disallowed_tools"),
-                permission_mode=claude_options.get("permission_mode"),
-                stream=False,
-            ):
-                chunks.append(chunk)
 
-            # Extract assistant message
-            raw_assistant_content = claude_cli.parse_claude_message(chunks)
+            # For n>1 we run the completion n times (sequentially). Each run
+            # produces one choice; usage is summed across runs. Only the FIRST
+            # choice is persisted to the session so we don't append multiple
+            # assistant turns for a single user request. Function calling is
+            # folded into each run via _run_single_completion (tool_prompt).
+            n_choices = request_body.n or 1
+            choices: List[Choice] = []
+            total_prompt_tokens = 0
+            total_completion_tokens = 0
 
-            if not raw_assistant_content:
-                raise HTTPException(status_code=500, detail="No response from Claude Code")
+            for index in range(n_choices):
+                (
+                    assistant_content,
+                    parsed_tool_calls,
+                    prompt_tokens,
+                    completion_tokens,
+                ) = await _run_single_completion(
+                    request_id=request_id,
+                    proxy_model=proxy_model,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    claude_options=claude_options,
+                    session_id=actual_session_id,
+                    tool_prompt=tool_prompt,
+                )
 
-            # Filter out tool usage and thinking blocks
-            assistant_content = MessageAdapter.filter_content(raw_assistant_content)
+                # Add only the first assistant response to the session. For a
+                # tool call there is no text content; store an empty string so
+                # the turn is still recorded.
+                if index == 0 and actual_session_id:
+                    assistant_message = Message(
+                        role="assistant", content=assistant_content if not parsed_tool_calls else ""
+                    )
+                    session_manager.add_assistant_response(actual_session_id, assistant_message)
 
-            # Add assistant response to session if using session mode
-            if actual_session_id:
-                assistant_message = Message(role="assistant", content=assistant_content)
-                session_manager.add_assistant_response(actual_session_id, assistant_message)
-
-            # Log the structured success event with real SDK usage/cost (falling
-            # back to estimate) and reuse the resolved token counts for the response.
-            claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
-            metadata = claude_cli.extract_metadata(chunks)
-            prompt_tokens, completion_tokens, _cost = _log_claude_proxy_success(
-                request_id=request_id,
-                requested_model=proxy_model,
-                metadata=metadata,
-                prompt=prompt,
-                completion_text=assistant_content,
-                session_id=actual_session_id,
-                duration_ms=claude_duration_ms,
-                endpoint="/v1/chat/completions",
-                streaming=False,
-            )
+                # If a prompt-based tool call was parsed, return it as OpenAI
+                # tool_calls with content=null and finish_reason=tool_calls;
+                # otherwise return the normal text response unchanged.
+                if parsed_tool_calls:
+                    choice_message = Message(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[ToolCall(**tc) for tc in parsed_tool_calls],
+                    )
+                    choices.append(
+                        Choice(index=index, message=choice_message, finish_reason="tool_calls")
+                    )
+                else:
+                    choices.append(
+                        Choice(
+                            index=index,
+                            message=Message(role="assistant", content=assistant_content),
+                            finish_reason="stop",
+                        )
+                    )
+                total_prompt_tokens += prompt_tokens
+                total_completion_tokens += completion_tokens
 
             # Create response
             response = ChatCompletionResponse(
                 id=request_id,
                 model=request_body.model,
-                choices=[
-                    Choice(
-                        index=0,
-                        message=Message(role="assistant", content=assistant_content),
-                        finish_reason="stop",
-                    )
-                ],
+                choices=choices,
                 usage=Usage(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    total_tokens=total_prompt_tokens + total_completion_tokens,
                 ),
             )
 
