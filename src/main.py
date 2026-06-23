@@ -1382,6 +1382,301 @@ async def chat_completions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _prepare_anthropic_request(
+    request_body: AnthropicMessagesRequest,
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Build the ``(prompt, system_prompt, tool_prompt)`` for /v1/messages.
+
+    Flattens the Anthropic messages into a prompt, resolves the caller's
+    system prompt, and folds the caller's tools into the system prompt via the
+    shared prompt-based function-calling machinery. Shared by the streaming and
+    non-streaming paths so they stay in lock-step.
+    """
+    messages = request_body.to_openai_messages()
+
+    prompt_parts = []
+    for msg in messages:
+        if msg.role == "user":
+            prompt_parts.append(msg.content)
+        elif msg.role == "assistant":
+            prompt_parts.append(f"Assistant: {msg.content}")
+    prompt = "\n\n".join(prompt_parts)
+
+    system_prompt = request_body.get_system_prompt()
+
+    effective_tools, effective_tool_choice = resolve_tools(
+        request_body.to_openai_tools(),
+        request_body.to_openai_tool_choice(),
+    )
+    tool_prompt = build_tool_prompt(effective_tools, effective_tool_choice)
+    if tool_prompt:
+        system_prompt = f"{system_prompt}\n\n{tool_prompt}" if system_prompt else tool_prompt
+
+    prompt = MessageAdapter.filter_content(prompt)
+    if system_prompt:
+        system_prompt = MessageAdapter.filter_content(system_prompt)
+
+    return prompt, system_prompt, tool_prompt
+
+
+def _anthropic_sse(event: str, data: Dict[str, Any]) -> str:
+    """Format a single named Server-Sent Event in the Anthropic stream shape."""
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+async def generate_anthropic_streaming_response(
+    request_body: AnthropicMessagesRequest, request_id: str, auth_method: Optional[str]
+) -> AsyncGenerator[str, None]:
+    """Generate Anthropic-format SSE for the /v1/messages endpoint.
+
+    Emits the native Anthropic event sequence (``message_start`` →
+    ``content_block_*`` → ``message_delta`` → ``message_stop``). Text responses
+    stream incrementally; because tool calls are emulated via prompting, the
+    full response must be buffered before we can tell a tool call from prose, so
+    when tools are requested the content is emitted after the SDK stream drains.
+    """
+    model = request_body.model
+    message_id = f"msg_{os.urandom(12).hex()}"
+    try:
+        prompt, system_prompt, tool_prompt = _prepare_anthropic_request(request_body)
+
+        _log_claude_proxy_start(
+            request_id, model, None, auth_method, "/v1/messages", streaming=True
+        )
+        claude_start = asyncio.get_event_loop().time()
+
+        # Anthropic reports input tokens in message_start; estimate up front
+        # (real token counts aren't known until the stream completes).
+        input_tokens = claude_cli.estimate_token_usage(prompt, "", model)["prompt_tokens"]
+
+        yield _anthropic_sse(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": message_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+                },
+            },
+        )
+
+        chunks_buffer: List[Dict[str, Any]] = []
+        text_block_open = False
+        stream_error_message = None
+
+        async for chunk in claude_cli.run_completion(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model=model,
+            max_turns=1,
+            disallowed_tools=CLAUDE_TOOLS,
+            use_claude_code_preset=False,
+            stream=True,
+        ):
+            chunks_buffer.append(chunk)
+
+            if chunk.get("is_error") or chunk.get("subtype") in (
+                "error_during_execution",
+                "error_max_turns",
+            ):
+                stream_error_message = chunk.get("error_message") or "Claude Code error"
+                logger.error(f"SDK error during streaming: {stream_error_message}")
+                break
+
+            # Defer all emission until the buffer is complete when tools are in
+            # play (can't distinguish a tool-call envelope mid-stream).
+            if tool_prompt:
+                continue
+
+            is_result_message = (
+                chunk.get("subtype") == "success"
+                or "total_cost_usd" in chunk
+                or chunk.get("type") == "result"
+            )
+            content = None
+            if not is_result_message:
+                if chunk.get("type") == "assistant" and "message" in chunk:
+                    message = chunk["message"]
+                    if isinstance(message, dict) and "content" in message:
+                        content = message["content"]
+                elif "content" in chunk and isinstance(chunk["content"], list):
+                    content = chunk["content"]
+            if content is None:
+                continue
+
+            blocks = content if isinstance(content, list) else [content]
+            for block in blocks:
+                if hasattr(block, "text"):
+                    raw_text = block.text
+                elif isinstance(block, dict) and block.get("type") == "text":
+                    raw_text = block.get("text", "")
+                elif isinstance(block, str):
+                    raw_text = block
+                else:
+                    continue
+
+                filtered_text = MessageAdapter.filter_content_streaming(raw_text)
+                if not filtered_text or filtered_text.isspace():
+                    continue
+                if not text_block_open:
+                    yield _anthropic_sse(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": 0,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    )
+                    text_block_open = True
+                for segment in MessageAdapter.segment_text(filtered_text, STREAM_MAX_DELTA_CHARS):
+                    if not segment:
+                        continue
+                    yield _anthropic_sse(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": segment},
+                        },
+                    )
+
+        # Buffered full response: used for tool detection, usage, and metadata.
+        assistant_content = (
+            claude_cli.parse_claude_message(chunks_buffer) if chunks_buffer else None
+        )
+        stop_reason = "end_turn"
+
+        if tool_prompt:
+            parsed_tool_calls = parse_tool_calls(assistant_content)
+            if parsed_tool_calls:
+                stop_reason = "tool_use"
+                for idx, tc in enumerate(parsed_tool_calls):
+                    fn = tc.get("function", {})
+                    try:
+                        tool_input = json.loads(fn.get("arguments", "{}"))
+                    except (ValueError, TypeError):
+                        tool_input = {}
+                    yield _anthropic_sse(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": idx,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": f"toolu_{os.urandom(12).hex()}",
+                                "name": fn.get("name", ""),
+                                "input": {},
+                            },
+                        },
+                    )
+                    yield _anthropic_sse(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": idx,
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": json.dumps(tool_input),
+                            },
+                        },
+                    )
+                    yield _anthropic_sse(
+                        "content_block_stop",
+                        {"type": "content_block_stop", "index": idx},
+                    )
+            else:
+                # Not a tool call: emit the buffered text as one text block.
+                filtered = MessageAdapter.filter_content(assistant_content or "")
+                yield _anthropic_sse(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
+                if filtered and not filtered.isspace():
+                    yield _anthropic_sse(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "text_delta", "text": filtered},
+                        },
+                    )
+                yield _anthropic_sse(
+                    "content_block_stop", {"type": "content_block_stop", "index": 0}
+                )
+        else:
+            # Text path: ensure a well-formed (possibly empty) block is closed.
+            if not text_block_open:
+                yield _anthropic_sse(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
+                text_block_open = True
+                fallback_text = (
+                    f"An error occurred while generating the response: {stream_error_message}"
+                    if stream_error_message
+                    else "I'm unable to provide a response at the moment."
+                )
+                yield _anthropic_sse(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": fallback_text},
+                    },
+                )
+            yield _anthropic_sse(
+                "content_block_stop", {"type": "content_block_stop", "index": 0}
+            )
+
+        output_tokens = claude_cli.estimate_token_usage(prompt, assistant_content or "", model)[
+            "completion_tokens"
+        ]
+        yield _anthropic_sse(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": {"output_tokens": output_tokens},
+            },
+        )
+        yield _anthropic_sse("message_stop", {"type": "message_stop"})
+
+        # Observability: surface the streamed request with real token/cost data.
+        claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
+        _log_claude_proxy_success(
+            request_id=request_id,
+            requested_model=model,
+            metadata=claude_cli.extract_metadata(chunks_buffer),
+            prompt=prompt,
+            completion_text=assistant_content or "",
+            session_id=None,
+            duration_ms=claude_duration_ms,
+            endpoint="/v1/messages",
+            streaming=True,
+        )
+
+    except Exception as e:
+        logger.error(f"Anthropic streaming error: {e}")
+        yield _anthropic_sse(
+            "error",
+            {"type": "error", "error": {"type": "api_error", "message": str(e)}},
+        )
+
+
 @app.post("/v1/messages")
 @rate_limit_endpoint("chat")
 async def anthropic_messages(
@@ -1413,37 +1708,23 @@ async def anthropic_messages(
         request_id = f"msg-{os.urandom(8).hex()}"
         logger.info(f"Anthropic Messages API request: model={request_body.model}")
 
-        # Convert Anthropic messages to internal format
-        messages = request_body.to_openai_messages()
+        # Streaming: return the native Anthropic SSE event stream.
+        if request_body.stream:
+            return StreamingResponse(
+                generate_anthropic_streaming_response(
+                    request_body, request_id, auth_info.get("method")
+                ),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                },
+            )
 
-        # Build prompt from messages
-        prompt_parts = []
-        for msg in messages:
-            if msg.role == "user":
-                prompt_parts.append(msg.content)
-            elif msg.role == "assistant":
-                prompt_parts.append(f"Assistant: {msg.content}")
-
-        prompt = "\n\n".join(prompt_parts)
-        system_prompt = request_body.get_system_prompt()
-
-        # Honor the caller's tools via the same prompt-based function-calling
-        # machinery used by /v1/chat/completions: render the tool schemas into a
-        # system-prompt fragment and parse any tool-call envelope back out of the
-        # raw response. The caller's tools are emulated rather than executed by
-        # the SDK, so the model's own (Claude Code) tools are left disabled.
-        effective_tools, effective_tool_choice = resolve_tools(
-            request_body.to_openai_tools(),
-            request_body.to_openai_tool_choice(),
-        )
-        tool_prompt = build_tool_prompt(effective_tools, effective_tool_choice)
-        if tool_prompt:
-            system_prompt = f"{system_prompt}\n\n{tool_prompt}" if system_prompt else tool_prompt
-
-        # Filter content
-        prompt = MessageAdapter.filter_content(prompt)
-        if system_prompt:
-            system_prompt = MessageAdapter.filter_content(system_prompt)
+        # Honor the caller's system/tools via the shared preparation helper: the
+        # caller's tools are emulated (not executed by the SDK) and folded into
+        # the system prompt; the model's own (Claude Code) tools stay disabled.
+        prompt, system_prompt, tool_prompt = _prepare_anthropic_request(request_body)
 
         # Run the model as a plain completion. This endpoint mirrors the native
         # Anthropic Messages API, so the caller's system/tools are authoritative:
