@@ -1126,9 +1126,7 @@ async def generate_streaming_response(
             finish_chunk = ChatCompletionStreamResponse(
                 id=request_id,
                 model=request.model,
-                choices=[
-                    StreamChoice(index=index, delta={}, finish_reason=choice_finish_reason)
-                ],
+                choices=[StreamChoice(index=index, delta={}, finish_reason=choice_finish_reason)],
                 usage=finish_usage,
             )
             yield f"data: {finish_chunk.model_dump_json()}\n\n"

@@ -82,9 +82,7 @@ class TestAnthropicMessagesModels:
             ],
         )
 
-        assert request.get_system_prompt() == (
-            "You are a pirate.\nAlways answer in one sentence."
-        )
+        assert request.get_system_prompt() == ("You are a pirate.\nAlways answer in one sentence.")
 
     def test_system_block_allows_cache_control(self):
         """Block-form system prompts with cache_control validate (extra keys allowed)."""

@@ -1,0 +1,4 @@
+# file: /home/user/claude-code-openai-wrapper/src/constants.py
+# hypothesis_version: 6.148.8
+
+[100, 200, 8000, 600000, ',', '1', '2023-06-01', '3600', '5', '60', 'ALLOWED_TOOLS', 'ANTHROPIC_MODELS_URL', 'ANTHROPIC_VERSION', 'Bash', 'BashOutput', 'DEFAULT_MODEL', 'DISALLOWED_TOOLS', 'ENABLE_TOOLS', 'Edit', 'FAST_MODEL', 'Glob', 'Grep', 'KillShell', 'NotebookEdit', 'Read', 'Skill', 'SlashCommand', 'Task', 'TodoWrite', 'WebFetch', 'WebSearch', 'Write', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude_code', 'false', 'on', 'preset', 'text', 'true', 'yes']

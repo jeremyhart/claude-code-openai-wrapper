@@ -1,0 +1,37 @@
+# Version control
+.git
+.gitignore
+
+# Python caches and artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Tests, docs, and examples are not needed at runtime
+tests/
+docs/
+examples/
+
+# Editor / OS cruft
+.idea/
+.vscode/
+.DS_Store
+
+# CI / build config that the image doesn't need
+.github/
+docker-compose.yml
+Dockerfile
