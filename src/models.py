@@ -50,10 +50,17 @@ class ToolCall(BaseModel):
 
 
 class Message(BaseModel):
-    role: Literal["system", "user", "assistant"]
+    # "tool" (and the legacy "function") are required so a client can send the
+    # result of a tool call back to continue an OpenAI function-calling
+    # round-trip. Without them the request fails validation before any handler
+    # runs (FastAPI returns 422 for messages with role "tool").
+    role: Literal["system", "user", "assistant", "tool", "function"]
     content: Optional[Union[str, List[ContentPart]]] = None
     name: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = None
+    # Set on a role="tool" message to correlate the result with the assistant
+    # tool_call it answers (OpenAI sends this back on the follow-up request).
+    tool_call_id: Optional[str] = None
 
     @model_validator(mode="after")
     def normalize_content(self):
