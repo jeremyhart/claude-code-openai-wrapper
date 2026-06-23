@@ -287,36 +287,39 @@ class TestCompatibilityReporter:
         report = CompatibilityReporter.generate_compatibility_report(request)
         assert "user (for logging)" in report["supported_parameters"]
 
-    def test_temperature_unsupported_when_not_default(self):
-        """Non-default temperature is flagged as unsupported."""
+    def test_temperature_best_effort_when_not_default(self):
+        """Non-default temperature is flagged as best-effort (not unsupported)."""
         request = ChatCompletionRequest(
             model="claude-sonnet-4-5-20250929",
             messages=[Message(role="user", content="Hello")],
             temperature=0.8,
         )
         report = CompatibilityReporter.generate_compatibility_report(request)
-        assert "temperature" in report["unsupported_parameters"]
+        assert "temperature" in report["best_effort_parameters"]
+        assert "temperature" not in report["unsupported_parameters"]
         assert len(report["suggestions"]) > 0
 
-    def test_top_p_unsupported_when_not_default(self):
-        """Non-default top_p is flagged as unsupported."""
+    def test_top_p_best_effort_when_not_default(self):
+        """Non-default top_p is flagged as best-effort (not unsupported)."""
         request = ChatCompletionRequest(
             model="claude-sonnet-4-5-20250929",
             messages=[Message(role="user", content="Hello")],
             top_p=0.9,
         )
         report = CompatibilityReporter.generate_compatibility_report(request)
-        assert "top_p" in report["unsupported_parameters"]
+        assert "top_p" in report["best_effort_parameters"]
+        assert "top_p" not in report["unsupported_parameters"]
 
-    def test_max_tokens_unsupported(self):
-        """max_tokens is flagged as unsupported."""
+    def test_max_tokens_best_effort(self):
+        """max_tokens is flagged as best-effort (mapped to max_thinking_tokens)."""
         request = ChatCompletionRequest(
             model="claude-sonnet-4-5-20250929",
             messages=[Message(role="user", content="Hello")],
             max_tokens=500,
         )
         report = CompatibilityReporter.generate_compatibility_report(request)
-        assert "max_tokens" in report["unsupported_parameters"]
+        assert "max_tokens" in report["best_effort_parameters"]
+        assert "max_tokens" not in report["unsupported_parameters"]
 
     def test_stop_sequences_unsupported(self):
         """stop sequences are flagged as unsupported."""
@@ -328,8 +331,8 @@ class TestCompatibilityReporter:
         report = CompatibilityReporter.generate_compatibility_report(request)
         assert "stop" in report["unsupported_parameters"]
 
-    def test_penalties_unsupported(self):
-        """presence_penalty and frequency_penalty are flagged as unsupported."""
+    def test_penalties_best_effort(self):
+        """presence_penalty and frequency_penalty are flagged as best-effort."""
         request = ChatCompletionRequest(
             model="claude-sonnet-4-5-20250929",
             messages=[Message(role="user", content="Hello")],
@@ -337,8 +340,10 @@ class TestCompatibilityReporter:
             frequency_penalty=0.5,
         )
         report = CompatibilityReporter.generate_compatibility_report(request)
-        assert "presence_penalty" in report["unsupported_parameters"]
-        assert "frequency_penalty" in report["unsupported_parameters"]
+        assert "presence_penalty" in report["best_effort_parameters"]
+        assert "frequency_penalty" in report["best_effort_parameters"]
+        assert "presence_penalty" not in report["unsupported_parameters"]
+        assert "frequency_penalty" not in report["unsupported_parameters"]
 
     def test_logit_bias_unsupported(self):
         """logit_bias is flagged as unsupported."""

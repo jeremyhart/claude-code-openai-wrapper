@@ -153,11 +153,20 @@ class TestChatCompletionRequest:
         with pytest.raises(ValueError):
             ChatCompletionRequest(messages=[Message(role="user", content="Hi")], top_p=1.5)
 
-    def test_n_must_be_1(self):
-        """n > 1 raises validation error."""
-        with pytest.raises(ValueError) as exc_info:
-            ChatCompletionRequest(messages=[Message(role="user", content="Hi")], n=3)
-        assert "multiple choices" in str(exc_info.value).lower()
+    def test_n_allows_multiple(self):
+        """n > 1 is now supported (multiple choices)."""
+        request = ChatCompletionRequest(messages=[Message(role="user", content="Hi")], n=3)
+        assert request.n == 3
+
+    def test_n_rejects_above_cap(self):
+        """n above the OpenAI-compatible cap (128) raises a validation error."""
+        with pytest.raises(ValueError):
+            ChatCompletionRequest(messages=[Message(role="user", content="Hi")], n=129)
+
+    def test_n_rejects_zero(self):
+        """n must be at least 1."""
+        with pytest.raises(ValueError):
+            ChatCompletionRequest(messages=[Message(role="user", content="Hi")], n=0)
 
     def test_presence_penalty_range(self):
         """presence_penalty must be between -2 and 2."""
