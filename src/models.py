@@ -680,8 +680,8 @@ class AnthropicMessagesResponse(BaseModel):
     role: Literal["assistant"] = "assistant"
     content: List[Union[AnthropicTextBlock, AnthropicToolUseBlock]]
     model: str
-    stop_reason: Optional[
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]
-    ] = "end_turn"
+    stop_reason: Optional[Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]] = (
+        "end_turn"
+    )
     stop_sequence: Optional[str] = None
     usage: AnthropicUsage

@@ -20,9 +20,7 @@ class TestSystemPromptFormats:
         ``{"type": "text", ...}`` is NOT understood by the SDK and would be
         silently dropped, so custom prompts must be plain strings.
         """
-        options = ClaudeAgentOptions(
-            max_turns=1, system_prompt="You are a helpful assistant."
-        )
+        options = ClaudeAgentOptions(max_turns=1, system_prompt="You are a helpful assistant.")
         assert options.system_prompt is not None
         assert isinstance(options.system_prompt, str)
         assert options.system_prompt == "You are a helpful assistant."

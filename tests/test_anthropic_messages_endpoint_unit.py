@@ -191,9 +191,9 @@ def _parse_sse(text):
         data = None
         for line in block.splitlines():
             if line.startswith("event:"):
-                event = line[len("event:"):].strip()
+                event = line[len("event:") :].strip()
             elif line.startswith("data:"):
-                data = json.loads(line[len("data:"):].strip())
+                data = json.loads(line[len("data:") :].strip())
         if event is not None:
             events.append((event, data))
     return events
@@ -228,9 +228,7 @@ def test_streaming_text_response(patched):
 
     # Text delta carries the streamed content.
     deltas = [d for e, d in events if e == "content_block_delta"]
-    streamed = "".join(
-        d["delta"]["text"] for d in deltas if d["delta"]["type"] == "text_delta"
-    )
+    streamed = "".join(d["delta"]["text"] for d in deltas if d["delta"]["type"] == "text_delta")
     assert "Hello there." in streamed
 
     # message_delta reports a normal end_turn stop reason.

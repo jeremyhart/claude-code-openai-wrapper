@@ -1638,9 +1638,7 @@ async def generate_anthropic_streaming_response(
                         "delta": {"type": "text_delta", "text": fallback_text},
                     },
                 )
-            yield _anthropic_sse(
-                "content_block_stop", {"type": "content_block_stop", "index": 0}
-            )
+            yield _anthropic_sse("content_block_stop", {"type": "content_block_stop", "index": 0})
 
         output_tokens = claude_cli.estimate_token_usage(prompt, assistant_content or "", model)[
             "completion_tokens"

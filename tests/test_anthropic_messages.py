@@ -191,9 +191,12 @@ class TestAnthropicMessagesModels:
             "function": {"name": "get_weather"},
         }
         # None when unset.
-        assert AnthropicMessagesRequest(
-            model="m", messages=[AnthropicMessage(role="user", content="x")]
-        ).to_openai_tool_choice() is None
+        assert (
+            AnthropicMessagesRequest(
+                model="m", messages=[AnthropicMessage(role="user", content="x")]
+            ).to_openai_tool_choice()
+            is None
+        )
 
     def test_tool_use_block(self):
         """AnthropicToolUseBlock has the expected shape and an auto id."""
