@@ -50,7 +50,19 @@ def _parse_labels(raw: Optional[str]) -> Dict[str, str]:
 
 
 class JsonLogFormatter(logging.Formatter):
-    """Render log records as single-line JSON so Loki's ``json`` parser can index them."""
+    """Render log records as single-line JSON so Loki's ``json`` parser can index them.
+
+    Any structured fields passed via ``logger.info(..., extra={...})`` (e.g.
+    ``model``, ``status_code``, ``duration_ms``) are merged into the top-level JSON
+    object so they become directly filterable in Grafana with ``| json``.
+    """
+
+    # Standard LogRecord attributes that should not be treated as user extras.
+    _RESERVED = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys()) | {
+        "message",
+        "asctime",
+        "taskName",
+    }
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {
@@ -59,10 +71,10 @@ class JsonLogFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        # Surface a request id when middleware attached one via `extra={...}`.
-        request_id = getattr(record, "request_id", None)
-        if request_id:
-            payload["request_id"] = request_id
+        # Merge any extra={...} fields supplied by the caller.
+        for key, value in record.__dict__.items():
+            if key not in self._RESERVED and not key.startswith("_"):
+                payload[key] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str)

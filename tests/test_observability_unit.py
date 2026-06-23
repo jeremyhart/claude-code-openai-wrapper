@@ -56,6 +56,33 @@ class TestJsonLogFormatter:
         data = json.loads(obs.JsonLogFormatter().format(record))
         assert data["request_id"] == "req-123"
 
+    def test_merges_extra_fields_and_drops_standard_attrs(self):
+        log = logging.getLogger("access")
+        record = log.makeRecord(
+            "access",
+            logging.INFO,
+            "f.py",
+            1,
+            "POST /v1/chat/completions -> 200",
+            (),
+            None,
+            extra={
+                "event": "http_access",
+                "status_code": 200,
+                "duration_ms": 12.3,
+                "model": "claude-sonnet-4-6",
+            },
+        )
+        data = json.loads(obs.JsonLogFormatter().format(record))
+        # Caller-provided structured fields are promoted to top level for `| json`.
+        assert data["event"] == "http_access"
+        assert data["status_code"] == 200
+        assert data["duration_ms"] == 12.3
+        assert data["model"] == "claude-sonnet-4-6"
+        # Standard LogRecord noise is not leaked into the payload.
+        for noisy in ("args", "msg", "levelno", "pathname", "processName", "thread"):
+            assert noisy not in data
+
     def test_includes_exception(self):
         try:
             raise ValueError("boom")

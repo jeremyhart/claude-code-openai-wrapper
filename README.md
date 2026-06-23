@@ -449,17 +449,35 @@ docker run -d -p 8000:8000 \
   ghcr.io/jeremyhart/claude-code-openai-wrapper:latest
 ```
 
-Each log line is JSON (`timestamp`, `level`, `logger`, `message`, and
-`request_id` when available), so in Grafana you can parse and filter with:
+Each log line is JSON (`timestamp`, `level`, `logger`, `message`, plus any
+structured fields), so in Grafana you can parse and filter with `| json`.
+
+**Confirming the proxy is working.** At `INFO` (the default) the wrapper emits a
+structured event per API call, so a Grafana panel can show traffic and success
+without enabling debug:
+
+- `event="http_access"` — one line per `/v1/*` request with `method`, `path`,
+  `status_code`, and `duration_ms`.
+- `event="claude_proxy_start"` — a request is being forwarded to Claude (`model`,
+  `auth_method`, `session_id`).
+- `event="claude_proxy_success"` — Claude responded successfully, with
+  `model`, `total_tokens`, and `claude_duration_ms`.
 
 ```logql
+# Successful chat completions proxied to Claude
+{job="claude-code-openai-wrapper"} | json | event="claude_proxy_success"
+
+# All API requests with their status and latency
+{job="claude-code-openai-wrapper"} | json | event="http_access" | line_format "{{.method}} {{.path}} {{.status_code}} {{.duration_ms}}ms"
+
+# Only errors
 {job="claude-code-openai-wrapper"} | json | level="ERROR"
 ```
 
 Every stream carries a `job` label (override with `LOKI_JOB`) and a `level`
 label, plus any static labels you add via `LOKI_LABELS`. Use `LOKI_LOG_LEVEL`
 to control the minimum level shipped (default `INFO`). Tip: set
-`DEBUG_MODE=true` to also push per-request debug logs to Loki.
+`DEBUG_MODE=true` to also push full request/response debug logs to Loki.
 
 ## Usage Examples
 

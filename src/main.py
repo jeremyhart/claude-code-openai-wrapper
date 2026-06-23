@@ -488,60 +488,77 @@ class DebugLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Get request ID for correlation
         request_id = getattr(request.state, "request_id", "unknown")
-
-        if not (DEBUG_MODE or VERBOSE):
-            return await call_next(request)
-
-        # Log request details
         start_time = asyncio.get_event_loop().time()
 
-        # Log basic request info with request ID for correlation
-        logger.debug(f"🔍 [{request_id}] Incoming request: {request.method} {request.url}")
-        logger.debug(f"🔍 [{request_id}] Headers: {dict(request.headers)}")
+        # Verbose body/header logging only in debug mode.
+        if DEBUG_MODE or VERBOSE:
+            logger.debug(f"🔍 [{request_id}] Incoming request: {request.method} {request.url}")
+            logger.debug(f"🔍 [{request_id}] Headers: {dict(request.headers)}")
 
-        # For POST requests, try to log body (but don't break if we can't)
-        body_logged = False
-        if request.method == "POST" and request.url.path.startswith("/v1/"):
-            try:
-                # Only attempt to read body if it's reasonable size and content-type
-                content_length = request.headers.get("content-length")
-                if content_length and int(content_length) < 100000:  # Less than 100KB
-                    body = await request.body()
-                    if body:
-                        try:
-                            import json as json_lib
+            body_logged = False
+            if request.method == "POST" and request.url.path.startswith("/v1/"):
+                try:
+                    content_length = request.headers.get("content-length")
+                    if content_length and int(content_length) < 100000:  # Less than 100KB
+                        body = await request.body()
+                        if body:
+                            try:
+                                import json as json_lib
 
-                            parsed_body = json_lib.loads(body.decode())
-                            logger.debug(
-                                f"🔍 Request body: {json_lib.dumps(parsed_body, indent=2)}"
-                            )
-                            body_logged = True
-                        except:
-                            logger.debug(f"🔍 Request body (raw): {body.decode()[:500]}...")
-                            body_logged = True
-            except Exception as e:
-                logger.debug(f"🔍 Could not read request body: {e}")
+                                parsed_body = json_lib.loads(body.decode())
+                                logger.debug(
+                                    f"🔍 Request body: {json_lib.dumps(parsed_body, indent=2)}"
+                                )
+                                body_logged = True
+                            except:
+                                logger.debug(f"🔍 Request body (raw): {body.decode()[:500]}...")
+                                body_logged = True
+                except Exception as e:
+                    logger.debug(f"🔍 Could not read request body: {e}")
 
-        if not body_logged and request.method == "POST":
-            logger.debug("🔍 Request body: [not logged - streaming or large payload]")
+            if not body_logged and request.method == "POST":
+                logger.debug("🔍 Request body: [not logged - streaming or large payload]")
 
-        # Process the request
+        # Only emit access logs for API traffic; skip health/metrics scrape noise.
+        path = request.url.path
+        is_api_request = path.startswith("/v1/")
+
         try:
             response = await call_next(request)
 
-            # Log response details
-            end_time = asyncio.get_event_loop().time()
-            duration = (end_time - start_time) * 1000  # Convert to milliseconds
+            duration_ms = (asyncio.get_event_loop().time() - start_time) * 1000
 
-            logger.debug(f"🔍 Response: {response.status_code} in {duration:.2f}ms")
+            # Always-on access log so a Grafana/Loki dashboard can confirm the proxy
+            # is serving requests, with status and latency per call.
+            if is_api_request:
+                logger.info(
+                    f"{request.method} {path} -> {response.status_code} in {duration_ms:.0f}ms",
+                    extra={
+                        "event": "http_access",
+                        "request_id": request_id,
+                        "method": request.method,
+                        "path": path,
+                        "status_code": response.status_code,
+                        "duration_ms": round(duration_ms, 1),
+                    },
+                )
+            else:
+                logger.debug(f"🔍 Response: {response.status_code} in {duration_ms:.2f}ms")
 
             return response
 
         except Exception as e:
-            end_time = asyncio.get_event_loop().time()
-            duration = (end_time - start_time) * 1000
-
-            logger.debug(f"🔍 Request failed after {duration:.2f}ms: {e}")
+            duration_ms = (asyncio.get_event_loop().time() - start_time) * 1000
+            logger.error(
+                f"{request.method} {path} failed after {duration_ms:.0f}ms: {e}",
+                extra={
+                    "event": "http_error",
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": path,
+                    "duration_ms": round(duration_ms, 1),
+                },
+            )
             raise
 
 
@@ -920,6 +937,18 @@ async def chat_completions(
                 logger.info(f"Tools enabled by user request: {DEFAULT_ALLOWED_TOOLS}")
 
             # Collect all chunks
+            proxy_model = claude_options.get("model") or request_body.model
+            logger.info(
+                f"Proxying chat completion to Claude (model={proxy_model})",
+                extra={
+                    "event": "claude_proxy_start",
+                    "request_id": request_id,
+                    "model": proxy_model,
+                    "session_id": actual_session_id,
+                    "auth_method": auth_info.get("method"),
+                },
+            )
+            claude_start = asyncio.get_event_loop().time()
             chunks = []
             async for chunk in claude_cli.run_completion(
                 prompt=prompt,
@@ -967,6 +996,22 @@ async def chat_completions(
                     completion_tokens=completion_tokens,
                     total_tokens=prompt_tokens + completion_tokens,
                 ),
+            )
+
+            claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
+            logger.info(
+                f"Claude completion succeeded (model={proxy_model}, "
+                f"{prompt_tokens + completion_tokens} tokens, {claude_duration_ms:.0f}ms)",
+                extra={
+                    "event": "claude_proxy_success",
+                    "request_id": request_id,
+                    "model": proxy_model,
+                    "session_id": actual_session_id,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "claude_duration_ms": round(claude_duration_ms, 1),
+                },
             )
 
             return response
