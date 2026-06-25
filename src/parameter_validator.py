@@ -151,12 +151,13 @@ class CompatibilityReporter:
 
         Parameters fall into three buckets:
 
-        - ``supported_parameters``: handled natively (model, messages, etc.).
+        - ``supported_parameters``: handled natively (model, messages, etc.)
+          or enforced by post-processing (stop, via output truncation).
         - ``best_effort_parameters``: no native SDK knob, but approximated via
           system-prompt sampling instructions (temperature, top_p,
           presence_penalty, frequency_penalty) or an approximate SDK mapping
           (max_tokens -> max_thinking_tokens).
-        - ``unsupported_parameters``: genuinely ignored (logit_bias, stop).
+        - ``unsupported_parameters``: genuinely ignored (logit_bias).
 
         ``best_effort_parameters`` are intentionally NOT added to
         ``unsupported_parameters`` so callers can distinguish "approximated"
@@ -221,9 +222,9 @@ class CompatibilityReporter:
 
         # Genuinely unsupported parameters.
         if request.stop:
-            report["unsupported_parameters"].append("stop")
+            report["supported_parameters"].append("stop")
             report["suggestions"].append(
-                "Stop sequences are not supported. Consider post-processing responses or using max_turns to limit output."
+                "stop sequences are supported; the response is truncated at the earliest stop string (excluded from the output, OpenAI-style)."
             )
 
         if request.logit_bias:

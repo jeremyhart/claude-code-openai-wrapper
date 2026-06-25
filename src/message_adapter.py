@@ -1,6 +1,106 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple, Union
 from src.models import Message
 import re
+
+
+def normalize_stop_sequences(stop: Union[str, List[str], None]) -> List[str]:
+    """Normalize an OpenAI-style ``stop`` value into a list of stop strings.
+
+    Accepts a single string, a list of strings, or ``None``. Returns a list
+    containing only the non-empty string entries (order preserved). Anything
+    that isn't a non-empty string is dropped, so the result is always safe to
+    iterate over when truncating output.
+    """
+    if stop is None:
+        return []
+    candidates = [stop] if isinstance(stop, str) else list(stop)
+    return [s for s in candidates if isinstance(s, str) and s]
+
+
+def apply_stop_sequences(
+    text: str, stop_sequences: Optional[List[str]]
+) -> Tuple[str, Optional[str]]:
+    """Truncate ``text`` at the earliest occurrence of any stop sequence.
+
+    Mirrors OpenAI semantics: the matched stop string itself is excluded from
+    the returned text. When several stop strings match, the one that occurs
+    earliest in the text wins (ties broken by the order given). Returns
+    ``(text, matched)`` where ``matched`` is the stop string that fired or
+    ``None`` if nothing matched (text returned unchanged).
+    """
+    if not text or not stop_sequences:
+        return text, None
+
+    earliest_idx: Optional[int] = None
+    matched: Optional[str] = None
+    for stop in stop_sequences:
+        if not stop:
+            continue
+        idx = text.find(stop)
+        if idx != -1 and (earliest_idx is None or idx < earliest_idx):
+            earliest_idx = idx
+            matched = stop
+
+    if earliest_idx is None:
+        return text, None
+    return text[:earliest_idx], matched
+
+
+class StreamingStopFilter:
+    """Stateful stop-sequence truncator for the streaming path.
+
+    Feed it the text of each delta as it arrives; it returns the portion that
+    is safe to emit *now*. To catch a stop sequence that straddles two deltas,
+    it holds back a tail of ``max(len(stop)) - 1`` characters until either more
+    text arrives or :meth:`flush` is called. Once a stop sequence is seen,
+    :attr:`done` becomes ``True``, :attr:`matched` records which one fired, and
+    all further input is dropped.
+    """
+
+    def __init__(self, stop_sequences: Optional[List[str]]):
+        self._stops = [s for s in (stop_sequences or []) if s]
+        self._buffer = ""
+        # Hold back enough chars that a stop sequence split across deltas is
+        # still detected once the rest arrives.
+        self._hold = max((len(s) for s in self._stops), default=1) - 1 if self._stops else 0
+        self.done = False
+        self.matched: Optional[str] = None
+
+    def feed(self, text: str) -> str:
+        """Accept the next delta; return text that is safe to emit now."""
+        if self.done:
+            return ""
+        if not self._stops:
+            return text or ""
+
+        self._buffer += text or ""
+
+        truncated, matched = apply_stop_sequences(self._buffer, self._stops)
+        if matched is not None:
+            self.done = True
+            self.matched = matched
+            self._buffer = ""
+            return truncated
+
+        # No complete match yet. Emit everything except the held-back tail so a
+        # stop sequence spanning this delta and the next is still catchable.
+        if self._hold > 0 and len(self._buffer) > self._hold:
+            emit = self._buffer[: -self._hold]
+            self._buffer = self._buffer[-self._hold :]
+            return emit
+        if self._hold == 0:
+            emit = self._buffer
+            self._buffer = ""
+            return emit
+        return ""
+
+    def flush(self) -> str:
+        """Emit any remaining buffered text (no stop sequence ever fired)."""
+        if self.done:
+            return ""
+        out = self._buffer
+        self._buffer = ""
+        return out
 
 
 class MessageAdapter:
