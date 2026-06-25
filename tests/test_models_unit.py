@@ -272,12 +272,15 @@ class TestChatCompletionRequest:
             temperature=0.5,
             presence_penalty=0.5,
             stop=["END"],
+            logit_bias={"123": 1.0},
         )
         with patch("src.models.logger") as mock_logger:
             request.log_parameter_info()
-            # Should have info for temperature, warnings for penalty and stop
+            # stop is now supported (logged as info); logit_bias remains a warning.
             assert mock_logger.info.called
             assert mock_logger.warning.called
+            info_text = str(mock_logger.info.call_args_list).lower()
+            assert "stop" in info_text
 
     def test_get_sampling_instructions_low_temperature(self):
         """Low temperature produces focused instructions."""

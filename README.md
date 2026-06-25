@@ -390,6 +390,20 @@ Run: `docker-compose up -d` | Stop: `docker-compose down`
 | `LOKI_LABELS` | Extra static Loki stream labels, comma-separated `key=value` (e.g. `env=prod,service=claude-wrapper`). | - |
 | `LOKI_JOB` | Value of the always-present `job` Loki label. | `claude-code-openai-wrapper` |
 | `LOKI_LOG_LEVEL` | Minimum log level shipped to Loki. | `INFO` |
+| `CLAUDE_EXTRA_STOP_SEQUENCES` | Comma-separated stop sequences applied to **every** completion, in addition to any `stop` the client sends. `\n` and `\t` escapes are decoded. Lets operators hard-stop runaway transcript continuation even when the client doesn't pass `stop`. Empty/unset ⇒ behavior unchanged. | - |
+| `STREAM_MAX_DELTA_CHARS` | Max characters per streamed content delta (`0` disables segmentation). | `0` |
+
+### Stop sequences
+
+The proxy honors OpenAI-style `stop` sequences by truncating the model's output at the earliest match (the stop string itself is excluded, like OpenAI). Claude Code has no native stop parameter, so this is enforced via post-processing on both the non-streaming and streaming paths. The streaming filter holds back a small tail so a stop sequence split across two deltas is still caught, and the truncated text (not the fabricated tail) is what gets saved to session history.
+
+`CLAUDE_EXTRA_STOP_SEQUENCES` adds server-wide stop sequences that apply even when the client sends none. This is especially useful behind a chat gateway (e.g. OpenClaw) that frames history with its own turn markers — the model otherwise tends to continue the transcript, fabricating the user's next turn and the gateway's inbound metadata envelope. The recommended value for chat-gateway use:
+
+```bash
+CLAUDE_EXTRA_STOP_SEQUENCES="\nH: [,\nHuman:,\nA: ,\nAssistant:,Conversation info (untrusted metadata)"
+```
+
+Server defaults are combined with the client's `stop` (defaults first, duplicates removed, order preserved).
 
 ### Management
 

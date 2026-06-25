@@ -7,7 +7,12 @@ These are pure unit tests that don't require a running server.
 """
 
 import pytest
-from src.message_adapter import MessageAdapter
+from src.message_adapter import (
+    MessageAdapter,
+    StreamingStopFilter,
+    apply_stop_sequences,
+    normalize_stop_sequences,
+)
 from src.models import FunctionCall, Message, ToolCall
 
 
@@ -370,3 +375,141 @@ class TestEstimateTokens:
         result = MessageAdapter.estimate_tokens(text)
         # 67 chars / 4 = 16 tokens
         assert result == 16
+
+
+class TestNormalizeStopSequences:
+    """Test normalize_stop_sequences()"""
+
+    def test_none_returns_empty_list(self):
+        assert normalize_stop_sequences(None) == []
+
+    def test_string_wrapped_in_list(self):
+        assert normalize_stop_sequences("STOP") == ["STOP"]
+
+    def test_list_passthrough(self):
+        assert normalize_stop_sequences(["a", "b"]) == ["a", "b"]
+
+    def test_empty_strings_dropped(self):
+        assert normalize_stop_sequences(["", "x", ""]) == ["x"]
+
+    def test_empty_string_is_noop(self):
+        assert normalize_stop_sequences("") == []
+
+    def test_non_string_entries_dropped(self):
+        # Defensive: only non-empty strings survive.
+        assert normalize_stop_sequences(["ok", None, 5]) == ["ok"]
+
+
+class TestApplyStopSequences:
+    """Test apply_stop_sequences()"""
+
+    def test_no_stop_is_noop(self):
+        text, matched = apply_stop_sequences("hello world", [])
+        assert text == "hello world"
+        assert matched is None
+
+    def test_none_stop_is_noop(self):
+        text, matched = apply_stop_sequences("hello world", None)
+        assert text == "hello world"
+        assert matched is None
+
+    def test_empty_text_is_noop(self):
+        text, matched = apply_stop_sequences("", ["x"])
+        assert text == ""
+        assert matched is None
+
+    def test_truncates_and_excludes_stop_string(self):
+        text, matched = apply_stop_sequences("keep this STOP drop this", ["STOP"])
+        assert text == "keep this "
+        assert matched == "STOP"
+        assert "STOP" not in text
+
+    def test_no_match_returns_text_unchanged(self):
+        text, matched = apply_stop_sequences("nothing here", ["STOP"])
+        assert text == "nothing here"
+        assert matched is None
+
+    def test_earliest_match_wins(self):
+        # "B" appears before "A" in the text even though "A" is listed first.
+        text, matched = apply_stop_sequences("xxByyAzz", ["A", "B"])
+        assert text == "xx"
+        assert matched == "B"
+
+    def test_string_vs_list_equivalent(self):
+        from_list = apply_stop_sequences("abcSTOPdef", ["STOP"])
+        # normalize_stop_sequences turns a bare string into a one-element list.
+        from_str = apply_stop_sequences("abcSTOPdef", normalize_stop_sequences("STOP"))
+        assert from_list == from_str == ("abc", "STOP")
+
+    def test_gateway_transcript_continuation(self):
+        """The motivating case: truncate a fabricated next user turn."""
+        text = "Here is my answer.\nH: [Thu 2026-06-25] next turn"
+        stop = normalize_stop_sequences("\nH: [")
+        truncated, matched = apply_stop_sequences(text, stop)
+        assert truncated == "Here is my answer."
+        assert matched == "\nH: ["
+
+
+class TestStreamingStopFilter:
+    """Test StreamingStopFilter for the streaming path."""
+
+    def test_no_stop_passes_through(self):
+        f = StreamingStopFilter([])
+        assert f.feed("hello ") == "hello "
+        assert f.feed("world") == "world"
+        assert f.flush() == ""
+        assert f.done is False
+        assert f.matched is None
+
+    def test_none_stop_passes_through(self):
+        f = StreamingStopFilter(None)
+        assert f.feed("abc") == "abc"
+        assert f.done is False
+
+    def test_single_delta_truncation(self):
+        f = StreamingStopFilter(["STOP"])
+        emitted = f.feed("keep STOP drop")
+        assert emitted == "keep "
+        assert f.done is True
+        assert f.matched == "STOP"
+        # Once done, further feeds emit nothing.
+        assert f.feed("more") == ""
+        assert f.flush() == ""
+
+    def test_stop_split_across_two_deltas(self):
+        f = StreamingStopFilter(["STOP"])
+        # "STOP" is split as "ST" + "OP" across deltas; must still be caught.
+        first = f.feed("keep ST")
+        # No part of the in-progress stop sequence leaks out.
+        assert "ST" not in first
+        assert f.done is False
+        second = f.feed("OP drop")
+        assert f.done is True
+        assert f.matched == "STOP"
+        # The reassembled emitted stream is the truncation, stop excluded.
+        assert first + second == "keep "
+        assert "STOP" not in (first + second)
+
+    def test_held_back_tail_flushed_when_no_match(self):
+        f = StreamingStopFilter(["STOP"])
+        first = f.feed("hello")
+        # Holds back max(len(stop))-1 == 3 chars ("llo").
+        assert first == "he"
+        # No stop ever arrives; flush emits the remainder.
+        assert f.flush() == "llo"
+        assert f.done is False
+
+    def test_reassembled_stream_equals_truncation(self):
+        f = StreamingStopFilter(["\nH: ["])
+        deltas = ["Here is my ", "answer.", "\nH: ", "[next turn"]
+        out = "".join(f.feed(d) for d in deltas)
+        out += f.flush()
+        assert out == "Here is my answer."
+        assert f.done is True
+        assert f.matched == "\nH: ["
+
+    def test_earliest_stop_wins_streaming(self):
+        f = StreamingStopFilter(["A", "B"])
+        emitted = f.feed("xxByyAzz")
+        assert emitted == "xx"
+        assert f.matched == "B"

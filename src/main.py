@@ -44,7 +44,12 @@ from src.models import (
     AnthropicUsage,
 )
 from src.claude_cli import ClaudeCodeCLI, find_sdk_error
-from src.message_adapter import MessageAdapter
+from src.message_adapter import (
+    MessageAdapter,
+    StreamingStopFilter,
+    apply_stop_sequences,
+    normalize_stop_sequences,
+)
 from src.function_calling import build_tool_prompt, parse_tool_calls, resolve_tools
 from src.auth import (
     verify_api_key,
@@ -753,6 +758,7 @@ async def _run_single_completion(
     claude_options: Dict[str, Any],
     session_id: Optional[str],
     tool_prompt: Optional[str] = None,
+    stop_sequences: Optional[List[str]] = None,
 ):
     """Run one non-streaming completion.
 
@@ -797,6 +803,15 @@ async def _run_single_completion(
     # Filter out tool usage and thinking blocks
     assistant_content = MessageAdapter.filter_content(raw_assistant_content)
 
+    # Honor stop sequences by truncating the response at the earliest match.
+    # Claude Code has no native stop param, so we post-process here (the matched
+    # stop string is excluded from the output, OpenAI-style).
+    if stop_sequences:
+        assistant_content, matched_stop = apply_stop_sequences(assistant_content, stop_sequences)
+        if matched_stop is not None:
+            assistant_content = assistant_content.rstrip()
+            logger.info(f"Truncated response at stop sequence: {matched_stop!r}")
+
     # Log the structured success event with real SDK usage/cost (falling
     # back to estimate) and reuse the resolved token counts for the response.
     claude_duration_ms = (asyncio.get_event_loop().time() - claude_start) * 1000
@@ -819,6 +834,46 @@ async def _run_single_completion(
 # large; splitting it into bounded segments lets clients render incrementally.
 # 0 disables segmentation (emit each filtered block as one delta).
 STREAM_MAX_DELTA_CHARS = int(os.getenv("STREAM_MAX_DELTA_CHARS", "0"))
+
+
+def _parse_default_stop_sequences(raw: Optional[str]) -> List[str]:
+    """Parse the ``CLAUDE_EXTRA_STOP_SEQUENCES`` env var into stop strings.
+
+    The value is a comma-separated list. Each entry has ``\\n`` and ``\\t``
+    escape sequences decoded so multi-line markers (e.g. ``"\\nHuman:"``) can be
+    expressed on a single env line. Empty entries are dropped. An unset or empty
+    env var yields an empty list (behavior unchanged).
+    """
+    if not raw:
+        return []
+    sequences: List[str] = []
+    for part in raw.split(","):
+        decoded = part.replace("\\n", "\n").replace("\\t", "\t")
+        if decoded:
+            sequences.append(decoded)
+    return sequences
+
+
+# Server-wide stop sequences applied to every completion, even when the client
+# doesn't send ``stop``. Lets operators hard-stop transcript continuation from a
+# chat gateway. Empty by default (no behavior change).
+DEFAULT_STOP_SEQUENCES = _parse_default_stop_sequences(os.getenv("CLAUDE_EXTRA_STOP_SEQUENCES"))
+
+
+def _effective_stop_sequences(request: ChatCompletionRequest) -> List[str]:
+    """Combine the server defaults with the client's ``stop``, de-duped.
+
+    Server defaults come first, then any client-supplied stop strings, with
+    duplicates removed and original order preserved.
+    """
+    combined = list(DEFAULT_STOP_SEQUENCES) + normalize_stop_sequences(request.stop)
+    seen: set = set()
+    result: List[str] = []
+    for stop in combined:
+        if stop not in seen:
+            seen.add(stop)
+            result.append(stop)
+    return result
 
 
 async def generate_streaming_response(
@@ -910,6 +965,10 @@ async def generate_streaming_response(
         # (no usage) and a single aggregated usage chunk is emitted at the end.
         attach_usage_to_finish = n_choices == 1
 
+        # Resolve effective stop sequences (server defaults + client stop) once
+        # for the whole streamed response; each choice gets its own filter.
+        stop_sequences = _effective_stop_sequences(request)
+
         def _build_role_chunk(index: int) -> str:
             """SSE line for the initial role delta (sent exactly once per choice)."""
             initial_chunk = ChatCompletionStreamResponse(
@@ -959,6 +1018,10 @@ async def generate_streaming_response(
             role_sent = False  # Track if we've sent the initial role chunk
             content_sent = False  # Track if we've sent any content
             stream_error_message = None  # Set if the SDK yields an error result
+            # Per-choice stop-sequence filter. Holds back a small tail so a stop
+            # sequence split across two deltas is still caught. A no-op when there
+            # are no stop sequences (feed returns its input unchanged).
+            stop_filter = StreamingStopFilter(stop_sequences)
 
             async for chunk in claude_cli.run_completion(
                 prompt=prompt,
@@ -1021,14 +1084,52 @@ async def generate_streaming_response(
                     # tool/thinking/image markup while preserving inter-token
                     # whitespace and never injecting placeholder fallback text.
                     filtered_text = MessageAdapter.filter_content_streaming(raw_text)
-                    if not filtered_text or filtered_text.isspace():
-                        # Skip empty / whitespace-only deltas; emitting them can
-                        # confuse strict OpenAI clients.
+                    if not filtered_text:
                         continue
-                    # Optionally smooth a very large block into multiple deltas.
-                    for segment in MessageAdapter.segment_text(
-                        filtered_text, STREAM_MAX_DELTA_CHARS
-                    ):
+
+                    if not stop_sequences:
+                        # Legacy path (no stop filtering): drop whitespace-only
+                        # deltas and emit directly, byte-for-byte as before.
+                        if filtered_text.isspace():
+                            continue
+                        for segment in MessageAdapter.segment_text(
+                            filtered_text, STREAM_MAX_DELTA_CHARS
+                        ):
+                            if not segment:
+                                continue
+                            yield _build_content_chunk(index, segment)
+                            content_sent = True
+                        continue
+
+                    # Stop-filtering path: route the delta through the stop
+                    # filter, which returns only the text safe to emit now (a
+                    # tail is held back to catch a stop sequence spanning deltas).
+                    emittable = stop_filter.feed(filtered_text)
+                    if emittable:
+                        for segment in MessageAdapter.segment_text(
+                            emittable, STREAM_MAX_DELTA_CHARS
+                        ):
+                            if not segment:
+                                continue
+                            yield _build_content_chunk(index, segment)
+                            content_sent = True
+                    if stop_filter.done:
+                        break
+
+                # A stop sequence fired: stop consuming further SDK output and
+                # finish the stream cleanly with finish_reason="stop".
+                if stop_filter.done:
+                    break
+
+            # No stop sequence fired but text may be held back in the filter's
+            # tail; emit it so the response isn't silently truncated.
+            if stop_sequences and not stop_filter.done:
+                remainder = stop_filter.flush()
+                if remainder and not remainder.isspace():
+                    if not role_sent:
+                        yield _build_role_chunk(index)
+                        role_sent = True
+                    for segment in MessageAdapter.segment_text(remainder, STREAM_MAX_DELTA_CHARS):
                         if not segment:
                             continue
                         yield _build_content_chunk(index, segment)
@@ -1039,6 +1140,20 @@ async def generate_streaming_response(
             assistant_content = None
             if chunks_buffer:
                 assistant_content = claude_cli.parse_claude_message(chunks_buffer)
+
+                # Truncate the buffered content at the stop sequence so session
+                # history doesn't keep the fabricated tail we never emitted.
+                # Skip when tools are in play; truncation could corrupt a tool
+                # call's JSON envelope (parsed below).
+                if stop_sequences and assistant_content and not tool_prompt:
+                    truncated, matched_stop = apply_stop_sequences(
+                        assistant_content, stop_sequences
+                    )
+                    if matched_stop is not None:
+                        assistant_content = truncated.rstrip()
+                        logger.info(
+                            f"Truncated streamed response at stop sequence: {matched_stop!r}"
+                        )
 
                 # Store in session only for the FIRST choice so we don't append
                 # multiple assistant turns for a single user request.
@@ -1357,6 +1472,9 @@ async def chat_completions(
             total_prompt_tokens = 0
             total_completion_tokens = 0
 
+            # Resolve effective stop sequences (server defaults + client stop).
+            stop_sequences = _effective_stop_sequences(request_body)
+
             for index in range(n_choices):
                 (
                     assistant_content,
@@ -1371,6 +1489,7 @@ async def chat_completions(
                     claude_options=claude_options,
                     session_id=actual_session_id,
                     tool_prompt=tool_prompt,
+                    stop_sequences=stop_sequences,
                 )
 
                 # Add only the first assistant response to the session. For a

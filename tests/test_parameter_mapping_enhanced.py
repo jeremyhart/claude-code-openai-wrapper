@@ -166,13 +166,13 @@ class TestLogParameterInfo:
             assert mock_logger.warning.called
             assert "logit_bias" in str(mock_logger.warning.call_args)
 
-    def test_stop_logged_as_warning(self):
-        """stop sequences remain an unsupported warning."""
+    def test_stop_logged_as_info(self):
+        """stop sequences are now supported (enforced via truncation), logged as info."""
         request = _request(stop=["END"])
         with patch("src.models.logger") as mock_logger:
             request.log_parameter_info()
-            assert mock_logger.warning.called
-            assert "stop" in str(mock_logger.warning.call_args).lower()
+            assert mock_logger.info.called
+            assert "stop" in str(mock_logger.info.call_args_list).lower()
 
     def test_temperature_and_top_p_logged_as_info(self):
         """temperature/top_p are best-effort info messages."""
@@ -249,10 +249,10 @@ class TestCompatibilityReporterClassification:
         assert "logit_bias" in report["unsupported_parameters"]
         assert "logit_bias" not in report["best_effort_parameters"]
 
-    def test_stop_is_unsupported(self):
+    def test_stop_is_supported(self):
         report = CompatibilityReporter.generate_compatibility_report(_request(stop=["END"]))
-        assert "stop" in report["unsupported_parameters"]
-        assert "stop" not in report["best_effort_parameters"]
+        assert "stop" in report["supported_parameters"]
+        assert "stop" not in report["unsupported_parameters"]
 
     def test_minimal_request_has_no_best_effort_or_unsupported(self):
         report = CompatibilityReporter.generate_compatibility_report(_request())

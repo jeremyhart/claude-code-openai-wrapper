@@ -192,7 +192,9 @@ class ChatCompletionRequest(BaseModel):
             warnings.append("logit_bias is not supported and will be ignored")
 
         if self.stop:
-            warnings.append("stop sequences are not supported and will be ignored")
+            info_messages.append(
+                "stop sequences are supported and enforced by truncating the response output"
+            )
 
         for msg in info_messages:
             logger.info(f"OpenAI API compatibility: {msg}")
